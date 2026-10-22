@@ -1095,7 +1095,12 @@ class BrowserManager:
 
     async def _click_conversation_row(self, page: Page, item) -> bool:
         try:
-            await item.scroll_into_view_if_needed(timeout=2000)
+            # 会话列表会实时刷新，等待“稳定”会偶发超时；直接滚到中心再按坐标点击。
+            try:
+                await item.evaluate("el => el.scrollIntoView({ block: 'center' })")
+            except Exception:
+                pass
+            await page.wait_for_timeout(120)
             box = await item.bounding_box()
             if not box:
                 return False

@@ -267,7 +267,7 @@ class AutoReplier:
                 break
             name = conv["name"]
             target_key = _conversation_key(conv)
-            if not await self.browser.open_conversation(page, int(conv.get("index") or 0)):
+            if not await self.browser.open_conversation_by_title(page, name):
                 skips.append((name, "打开会话失败"))
                 continue
             messages = await self.browser.read_chat_messages(page)
