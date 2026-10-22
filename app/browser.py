@@ -600,11 +600,27 @@ NOTIFICATION_ROWS_JS = r"""
     }
     const name = clean(card.innerText).replace(/^@/, '');
     if (!name) continue;
+    const preEls = [...row.querySelectorAll('pre')];
+    const comment = clean(preEls.length ? preEls[preEls.length - 1].innerText : '').slice(0, 300);
+    const thumbImg = [...row.querySelectorAll('img')].reverse().find(img => {
+      const r = img.getBoundingClientRect();
+      return r.width >= 40 && r.height >= 40;
+    });
+    const kind = text.includes('评论了你的作品')
+      ? 'comment'
+      : text.includes('关注了你')
+        ? 'follow'
+        : text.includes('赞了')
+          ? 'like'
+          : 'other';
     out.push({
       name,
       url: (link && link.href) || '',
       text: text.slice(0, 320),
       mutual: text.includes('互相关注'),
+      comment,
+      thumb: (thumbImg && thumbImg.src) || '',
+      kind,
     });
   }
   return out;
@@ -1145,6 +1161,174 @@ class BrowserManager:
                     return True
         print(f"[chat] open conversation failed title={wanted!r} count={count} exact={exact} loose={loose}", flush=True)
         return False
+
+    async def reply_comment_on_work(
+        self,
+        work_url: str,
+        author: str,
+        comment: str,
+        reply_text: str,
+    ) -> dict[str, Any]:
+        page = await self.new_page()
+        page.set_default_timeout(20000)
+        shot_name = f"reply_comment_{_now_tag()}.png"
+        shot_path = self._shots / shot_name
+        try:
+            await page.goto(work_url, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(3000)
+            opened = False
+            for sel in (
+                '[data-e2e="feed-comment-icon"]',
+                '[data-e2e="comment-icon"]',
+                '[data-e2e="video-comment"]',
+            ):
+                loc = page.locator(sel)
+                for i in range(await loc.count()):
+                    try:
+                        if not await loc.nth(i).is_visible():
+                            continue
+                        box = await loc.nth(i).bounding_box()
+                        if not box:
+                            continue
+                        await page.evaluate(
+                            "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = 'none'; }"
+                        )
+                        try:
+                            await page.mouse.click(
+                                box["x"] + box["width"] / 2,
+                                box["y"] + box["height"] / 2,
+                            )
+                        finally:
+                            await page.evaluate(
+                                "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = ''; }"
+                            )
+                        opened = True
+                        break
+                    except Exception:
+                        continue
+                if opened:
+                    break
+            if not opened:
+                return {"status": "failed", "detail": "没有打开评论面板"}
+            await page.wait_for_timeout(1600)
+
+            target = await page.evaluate(
+                """([author, comment]) => {
+                  const controls = [...document.querySelectorAll('span, div')].filter(el => {
+                    if ((el.innerText || '').trim() !== '回复') return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                  });
+                  const hit = controls.find(el => {
+                    const item = el.closest('[data-e2e="comment-item"]');
+                    const text = ((item && item.innerText) || '').replace(/\\s+/g, ' ');
+                    return text.includes(author) && (!comment || text.includes(comment));
+                  }) || controls[0];
+                  if (!hit) return null;
+                  hit.setAttribute('data-dy-agent-reply', '1');
+                  const r = hit.getBoundingClientRect();
+                  return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+                }""",
+                [author, comment],
+            )
+            if not target:
+                return {"status": "failed", "detail": "没有找到这条评论的回复按钮"}
+            await page.evaluate(
+                "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = 'none'; }"
+            )
+            try:
+                await page.mouse.click(target["x"] + target["w"] / 2, target["y"] + target["h"] / 2)
+            finally:
+                await page.evaluate(
+                    "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = ''; }"
+                )
+            await page.wait_for_timeout(800)
+
+            editor = None
+            editors = page.locator('.public-DraftEditor-content')
+            for i in range(await editors.count()):
+                if await editors.nth(i).is_visible():
+                    editor = editors.nth(i)
+                    break
+            if editor is None:
+                for sel in (
+                    '#comment-input-container [contenteditable="true"]',
+                    '.comment-input-container [contenteditable="true"]',
+                    'textarea',
+                ):
+                    loc = page.locator(sel)
+                    for i in range(await loc.count()):
+                        if await loc.nth(i).is_visible():
+                            editor = loc.nth(i)
+                            break
+                    if editor is not None:
+                        break
+            if editor is None:
+                return {"status": "failed", "detail": "没有找到回复输入框"}
+            try:
+                await editor.click(timeout=4000)
+                await page.keyboard.insert_text(reply_text)
+                await page.wait_for_timeout(700)
+            except Exception as exc:
+                return {"status": "failed", "detail": f"填写回复失败：{str(exc)[:160]}"}
+
+            send = await self._find_visible_in(page, selectors.COMMENT_SEND)
+            if not send:
+                await page.evaluate(
+                    """() => {
+                      const spans = [...document.querySelectorAll('span, button')].filter(el => {
+                        const r = el.getBoundingClientRect();
+                        if (r.width < 8 || r.height < 8) return false;
+                        const html = el.outerHTML || '';
+                        return html.includes('#FE2C55') &&
+                          !!el.closest('#comment-input-container, .comment-input-container, .commentInput-right-ct');
+                      });
+                      const el = spans[spans.length - 1];
+                      if (el) el.setAttribute('data-dy-agent-send', '1');
+                    }"""
+                )
+                if await page.locator('[data-dy-agent-send="1"]').count():
+                    send = page.locator('[data-dy-agent-send="1"]').first
+            if not send:
+                await page.screenshot(path=str(shot_path))
+                return {"status": "failed", "detail": f"没有找到发送按钮。截图：/media/shots/{shot_name}"}
+            try:
+                await send.click(timeout=5000)
+            except Exception as exc:
+                await page.screenshot(path=str(shot_path))
+                return {"status": "failed", "detail": f"点击发送失败：{str(exc)[:160]}"}
+            await page.wait_for_timeout(1700)
+            try:
+                await page.screenshot(path=str(shot_path))
+            except Exception:
+                pass
+            verified = False
+            try:
+                body = await page.evaluate("() => document.body ? document.body.innerText : ''")
+                verified = reply_text[:12] in body
+            except Exception:
+                pass
+            return {
+                "status": "sent" if verified else "uncertain",
+                "detail": "评论回复已发送" if verified else "已点击发送，但未读到确认",
+                "screenshot": f"/media/shots/{shot_name}",
+            }
+        except Exception as exc:
+            try:
+                await page.screenshot(path=str(shot_path))
+            except Exception:
+                pass
+            return {
+                "status": "failed",
+                "detail": f"评论回复失败：{str(exc)[:200]}",
+                "screenshot": f"/media/shots/{shot_name}",
+            }
+        finally:
+            if not page.is_closed():
+                try:
+                    await page.close()
+                except Exception:
+                    pass
 
     async def read_chat_messages(self, page: Page) -> list[dict[str, Any]]:
         try:

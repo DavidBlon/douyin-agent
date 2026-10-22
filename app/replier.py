@@ -38,6 +38,7 @@ class AutoReplier:
         self.last_check = ""
         self.last_error = ""
         self.last_result: dict[str, Any] = {}
+        self._last_skip_signature: tuple[tuple[str, str], ...] = ()
 
     @property
     def running(self) -> bool:
@@ -260,19 +261,23 @@ class AutoReplier:
 
         decider = DeepSeekDecider(settings)
         handled = 0
+        skips: list[tuple[str, str]] = []
         for conv in candidates[:4]:
             if self._stop.is_set():
                 break
             name = conv["name"]
             target_key = _conversation_key(conv)
             if not await self.browser.open_conversation(page, int(conv.get("index") or 0)):
+                skips.append((name, "打开会话失败"))
                 continue
             messages = await self.browser.read_chat_messages(page)
             if not messages:
+                skips.append((name, "没有读到消息"))
                 continue
             latest = messages[0]
             latest_text = str(latest.get("text") or "").strip()
             if not latest_text:
+                skips.append((name, "最后一条没有文字"))
                 continue
             contact_avatar = _base_url(str(conv.get("avatar") or ""))
             latest_avatar = _base_url(str(latest.get("avatar") or ""))
@@ -283,6 +288,7 @@ class AutoReplier:
                     conv["preview"] in latest_text or latest_text in conv["preview"]
                 )
             if not incoming:
+                skips.append((name, "最后一条不是对方发的"))
                 continue
             dry_key = f"{target_key}|{latest_text}"
             if settings.dry_run and dry_key in self._dry_run_seen:
@@ -299,6 +305,7 @@ class AutoReplier:
             }
             decision, usage = await decider.reply("dm", context, db.recent_replies(6))
             if not decision.share and db.reply_exists("reply_dm", target_key, latest_text):
+                skips.append((name, "这条消息已经回复过"))
                 continue
             if decision.share:
                 share_result = await share_one_to_contact(
@@ -335,6 +342,7 @@ class AutoReplier:
                 continue
             reply = policy.clean_text(decision.reply, settings.max_dm_chars)
             if not reply:
+                skips.append((name, "模型判断不需要回复"))
                 db.add_reply(
                     kind="reply_dm",
                     target_key=target_key,
@@ -359,6 +367,7 @@ class AutoReplier:
                 name, conv["relation"], conv["allowlisted"], reply, settings
             )
             if not check.allowed:
+                skips.append((name, f"策略拦截：{check.reason}"))
                 db.add_reply(
                     kind="reply_dm",
                     target_key=target_key,
@@ -404,6 +413,7 @@ class AutoReplier:
             try:
                 result = await self.browser.send_chat_message(page, reply)
             except Exception as exc:
+                skips.append((name, "发送失败"))
                 await self._record(
                     settings,
                     "reply_dm",
@@ -446,6 +456,19 @@ class AutoReplier:
                 {"contact": name, "incoming": latest_text[:120], "reply": reply, "status": status},
                 level="info" if status == "sent" else "warn",
             )
+        signature = tuple(sorted(set(skips)))
+        if signature and signature != self._last_skip_signature:
+            preview = "；".join(f"{n}（{r}）" for n, r in signature[:6])
+            extra = f" 等 {len(signature)} 个会话" if len(signature) > 6 else ""
+            await bus.emit(
+                "reply",
+                f"私信跳过：{preview}{extra}",
+                {"skips": [{"name": n, "reason": r} for n, r in signature]},
+                level="info",
+            )
+            self._last_skip_signature = signature
+        elif not signature:
+            self._last_skip_signature = ()
         return handled
 
     async def _notice_comments(self, page: Page, settings: AgentSettings) -> int:
@@ -453,28 +476,206 @@ class AutoReplier:
         actionable = [
             row
             for row in rows
-            if any(key in str(row.get("text") or "") for key in ("回复", "评论了你的作品", "评论了你的评论"))
+            if row.get("kind") == "comment"
+            and str(row.get("comment") or "").strip()
+            and "评论了你的作品" in str(row.get("text") or "")
+            and len(str(row.get("text") or "")) <= 400
         ]
         if not actionable:
             return 0
-        for row in actionable[:3]:
+
+        async def load_works() -> list[dict[str, str]]:
+            js = """() => [...document.querySelectorAll('[data-e2e="user-post-list"] a[href*="/note/"], [data-e2e="user-post-list"] a[href*="/video/"]')].map(a => {
+              const img = a.querySelector('img');
+              return {
+                url: a.href || '',
+                cover: ((img && img.src) || '').split('?')[0],
+                title: ((img && img.alt) || '').slice(0, 300),
+              };
+            })"""
+            try:
+                works = await page.evaluate(js)
+            except Exception:
+                works = []
+            if not works:
+                try:
+                    await page.goto("https://www.douyin.com/user/self", wait_until="domcontentloaded", timeout=60000)
+                    await page.wait_for_timeout(2500)
+                    works = await page.evaluate(js)
+                except Exception:
+                    works = []
+            out: list[dict[str, str]] = []
+            for item in works or []:
+                if not isinstance(item, dict) or not item.get("url"):
+                    continue
+                url = str(item["url"])
+                if url.startswith("//"):
+                    url = "https:" + url
+                out.append(
+                    {
+                        "url": url,
+                        "cover": str(item.get("cover") or ""),
+                        "title": str(item.get("title") or ""),
+                    }
+                )
+            return out
+
+        works = await load_works()
+        decider = DeepSeekDecider(settings)
+        handled = 0
+        for row in actionable[:2]:
+            name = str(row.get("name") or "").strip()
+            comment = str(row.get("comment") or "").strip()
+            notification = str(row.get("text") or "").strip()
+            if not name or not comment:
+                continue
+            thumb = str(row.get("thumb") or "").split("?")[0]
+            target = next((work for work in works if thumb and work.get("cover") == thumb), None)
+            if target is None and len(works) == 1:
+                target = works[0]
+            if target is None:
+                await bus.emit(
+                    "reply",
+                    f"评论跳过：{name}（找不到对应作品）",
+                    {"contact": name, "comment": comment[:120]},
+                    level="warn",
+                )
+                continue
+            work_url = target["url"]
+            if db.reply_exists("reply_comment", work_url, comment):
+                continue
             await bus.emit(
                 "reply",
-                f"检测到评论互动：{row.get('name') or '未知用户'}",
+                f"检测到评论：{name}",
                 {
-                    "name": row.get("name") or "",
-                    "text": str(row.get("text") or "")[:200],
-                    "note": "评论回复的定位与发送路径仍需真实通知校准，暂不自动发送",
+                    "contact": name,
+                    "comment": comment[:200],
+                    "work_url": work_url,
+                    "work_title": target.get("title", "")[:160],
                 },
-                level="warn",
             )
-        await bus.emit(
-            "reply",
-            "评论回复已检测到，但发送路径尚未校准，本次不自动发送",
-            {"count": len(actionable[:3])},
-            level="warn",
-        )
-        return 0
+            context = {
+                "title": target.get("title") or "",
+                "video_author": settings.agent_name or "我",
+                "notification": notification,
+                "contact": name,
+                "comment": comment,
+                "our_comment": "",
+            }
+            try:
+                decision, usage = await decider.reply("comment", context, db.recent_replies(6))
+            except LLMError as exc:
+                await bus.emit(
+                    "reply",
+                    f"评论回复模型调用失败：{name}",
+                    {"contact": name, "error": str(exc)[:200]},
+                    level="error",
+                )
+                continue
+            reply = policy.clean_text(decision.reply, settings.max_comment_chars)
+            if not reply:
+                db.add_reply(
+                    kind="reply_comment",
+                    target_key=work_url,
+                    incoming=comment,
+                    reply="",
+                    status="skipped",
+                )
+                await bus.emit(
+                    "reply",
+                    f"评论不回复：{name}",
+                    {
+                        "contact": name,
+                        "comment": comment[:120],
+                        "reason": decision.reason,
+                        "confidence": decision.confidence,
+                        "usage": usage,
+                    },
+                )
+                continue
+            check = policy.check_comment_reply(name, reply, settings)
+            if not check.allowed:
+                db.add_reply(
+                    kind="reply_comment",
+                    target_key=work_url,
+                    incoming=comment,
+                    reply="",
+                    status="blocked",
+                )
+                await self._record(
+                    settings,
+                    "reply_comment",
+                    work_url,
+                    name,
+                    work_url,
+                    comment,
+                    reply,
+                    "blocked",
+                    check.reason,
+                )
+                await bus.emit(
+                    "reply",
+                    f"评论回复被策略拦截：{check.reason}",
+                    {"contact": name, "reply": reply},
+                    level="warn",
+                )
+                continue
+            if settings.dry_run:
+                await self._record(
+                    settings,
+                    "reply_comment",
+                    work_url,
+                    name,
+                    work_url,
+                    comment,
+                    reply,
+                    "dry_run",
+                    decision.reason,
+                    "预演，未发送",
+                )
+                await bus.emit(
+                    "reply",
+                    f"预演评论回复 → {name}：{reply}",
+                    {"contact": name, "comment": comment[:120], "reply": reply, "dry_run": True},
+                )
+                continue
+            result = await self.browser.reply_comment_on_work(work_url, name, comment, reply)
+            status = str(result.get("status") or "failed")
+            if status in ("sent", "uncertain"):
+                db.add_reply(
+                    kind="reply_comment",
+                    target_key=work_url,
+                    incoming=comment,
+                    reply=reply,
+                    status=status,
+                )
+                handled += 1
+            await self._record(
+                settings,
+                "reply_comment",
+                work_url,
+                name,
+                work_url,
+                comment,
+                reply,
+                status,
+                decision.reason,
+                str(result.get("detail") or ""),
+            )
+            await bus.emit(
+                "reply",
+                f"已回复评论 {name}：{reply}" if status == "sent" else f"评论回复{status}：{name}",
+                {
+                    "contact": name,
+                    "comment": comment[:120],
+                    "reply": reply,
+                    "status": status,
+                    "detail": result.get("detail") or "",
+                    "screenshot": result.get("screenshot") or "",
+                },
+                level="info" if status == "sent" else "warn",
+            )
+        return handled
 
     async def _record(
         self,
