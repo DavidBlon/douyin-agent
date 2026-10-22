@@ -587,12 +587,12 @@ input, textarea, [contenteditable="true"] {
 
 /* collapsed sidebar */
 @media (min-width: 961px) {
-  .app.sidebar-collapsed { grid-template-columns: 68px minmax(0, 1fr); }
-  .sidebar-collapsed .sidebar { padding: 18px 8px 14px; }
-  .sidebar-collapsed .sidebar-head { flex-direction: column; align-items: center; gap: 10px; padding: 2px 0 18px; }
-  .sidebar-collapsed .brand { justify-content: center; padding: 0; }
+  .app.sidebar-collapsed { grid-template-columns: 80px minmax(0, 1fr); }
+  .sidebar-collapsed .sidebar { padding: 18px 6px 14px; }
+  .sidebar-collapsed .sidebar-head { gap: 6px; padding: 2px 0 18px; }
+  .sidebar-collapsed .brand { padding: 0; }
   .sidebar-collapsed .brand-text { display: none; }
-  .sidebar-collapsed .sidebar-toggle { width: 30px; height: 26px; border-color: var(--line); color: var(--muted); }
+  .sidebar-collapsed .sidebar-toggle { width: 26px; height: 26px; border-color: var(--line); color: var(--muted); }
   .sidebar-collapsed .sidebar-toggle:hover { border-color: var(--line-strong); color: var(--text); }
   .sidebar-collapsed .nav { gap: 4px; }
   .sidebar-collapsed .nav-item { position: relative; width: 42px; height: 42px; margin: 0 auto; padding: 0; justify-content: center; gap: 0; }
