@@ -33,6 +33,10 @@ class FakeBrowser:
         self.opened += 1
         return True
 
+    async def open_conversation_by_title(self, page, title):
+        self.opened += 1
+        return True
+
     async def read_chat_messages(self, page):
         return self.messages
 
