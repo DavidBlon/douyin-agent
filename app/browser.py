@@ -1095,12 +1095,16 @@ class BrowserManager:
 
     async def _click_conversation_row(self, page: Page, item) -> bool:
         try:
-            # 会话列表会实时刷新，等待“稳定”会偶发超时；直接滚到中心再按坐标点击。
+            # 会话列表会实时刷新，等待“稳定”会偶发超时；直接滚到中心、等列表落定再按坐标点击。
+            try:
+                await page.mouse.move(8, 8)
+            except Exception:
+                pass
             try:
                 await item.evaluate("el => el.scrollIntoView({ block: 'center' })")
             except Exception:
                 pass
-            await page.wait_for_timeout(120)
+            await page.wait_for_timeout(500)
             box = await item.bounding_box()
             if not box:
                 return False
@@ -1134,37 +1138,51 @@ class BrowserManager:
         if not wanted:
             return False
         items = page.locator('[data-e2e="conversation-item"]')
-        try:
-            count = await items.count()
-        except Exception:
-            return False
-        exact: list[int] = []
-        loose: list[int] = []
-        for index in range(count):
+        count = 0
+        last_exact: list[int] = []
+        last_loose: list[int] = []
+        for _attempt in range(3):
             try:
-                title_el = items.nth(index).locator('.conversationConversationItemtitle')
-                if not await title_el.count():
-                    continue
-                name = (await title_el.inner_text()).strip()
+                count = await items.count()
             except Exception:
-                continue
-            if name == wanted:
-                exact.append(index)
-            elif wanted and (wanted in name or name in wanted):
-                loose.append(index)
-        for index in exact + loose:
-            item = items.nth(index)
-            if not await self._click_conversation_row(page, item):
-                continue
-            for _ in range(16):
-                await page.wait_for_timeout(250)
+                count = 0
+            exact: list[int] = []
+            loose: list[int] = []
+            for index in range(count):
                 try:
-                    header = (await page.locator('.StackLayoutStackChatHeadertitle').first.inner_text()).strip()
+                    title_el = items.nth(index).locator('.conversationConversationItemtitle')
+                    if not await title_el.count():
+                        continue
+                    name = (await title_el.inner_text()).strip()
                 except Exception:
-                    header = ""
-                if header and (header == wanted or wanted in header):
-                    return True
-        print(f"[chat] open conversation failed title={wanted!r} count={count} exact={exact} loose={loose}", flush=True)
+                    continue
+                if name == wanted:
+                    exact.append(index)
+                elif wanted and (wanted in name or name in wanted):
+                    loose.append(index)
+            last_exact, last_loose = exact, loose
+            for index in exact + loose:
+                item = items.nth(index)
+                if not await self._click_conversation_row(page, item):
+                    continue
+                for _ in range(16):
+                    await page.wait_for_timeout(250)
+                    try:
+                        header = (await page.locator('.StackLayoutStackChatHeadertitle').first.inner_text()).strip()
+                    except Exception:
+                        header = ""
+                    if header and (header == wanted or wanted in header):
+                        return True
+            try:
+                await page.mouse.move(8, 8)
+                await page.wait_for_timeout(350)
+            except Exception:
+                pass
+        print(
+            f"[chat] open conversation failed title={wanted!r} count={count} "
+            f"exact={last_exact} loose={last_loose}",
+            flush=True,
+        )
         return False
 
     async def reply_comment_on_work(

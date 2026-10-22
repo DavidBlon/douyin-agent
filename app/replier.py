@@ -39,6 +39,7 @@ class AutoReplier:
         self.last_error = ""
         self.last_result: dict[str, Any] = {}
         self._last_skip_signature: tuple[tuple[str, str], ...] = ()
+        self._worker_pages: list[Page] = []
 
     @property
     def running(self) -> bool:
@@ -136,6 +137,11 @@ class AutoReplier:
             pass
         return page
 
+    async def _new_work_page(self) -> Page:
+        page = await self._new_inbox_page()
+        self._worker_pages.append(page)
+        return page
+
     async def check_once(self) -> dict[str, Any]:
         settings = db.load_settings()
         if not settings.auto_reply or self.busy:
@@ -181,6 +187,13 @@ class AutoReplier:
                 return {"ok": True, "dm": dm_done, "comment": comment_done}
         finally:
             self.busy = False
+            for extra in list(self._worker_pages):
+                if extra is not page and not extra.is_closed():
+                    try:
+                        await extra.close()
+                    except Exception:
+                        pass
+            self._worker_pages.clear()
             if page is not None and not page.is_closed():
                 try:
                     await page.close()
@@ -204,6 +217,18 @@ class AutoReplier:
             if str(row.get("name") or "").strip()
         }
         conversations = await self.browser.list_conversations(page)
+        for _ in range(2):
+            if conversations:
+                break
+            await page.wait_for_timeout(1200)
+            conversations = await self.browser.list_conversations(page)
+        if not conversations:
+            try:
+                await page.goto(INBOX_URL, wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(2500)
+                conversations = await self.browser.list_conversations(page)
+            except Exception:
+                conversations = []
         if conversations:
             chat.remember_conversations(conversations)
         if not conversations:
@@ -262,15 +287,37 @@ class AutoReplier:
         decider = DeepSeekDecider(settings)
         handled = 0
         skips: list[tuple[str, str]] = []
-        for conv in candidates[:4]:
+        active_page = page
+        for idx, conv in enumerate(candidates[:4]):
             if self._stop.is_set():
                 break
             name = conv["name"]
             target_key = _conversation_key(conv)
-            if not await self.browser.open_conversation_by_title(page, name):
+            if idx > 0:
+                # 回复完上一个人后页面状态会变化，换一张干净收件箱页再开下一个人。
+                if active_page is not page and not active_page.is_closed():
+                    try:
+                        await active_page.close()
+                    except Exception:
+                        pass
+                    if active_page in self._worker_pages:
+                        self._worker_pages.remove(active_page)
+                try:
+                    active_page = await self._new_work_page()
+                    fresh = await self.browser.list_conversations(active_page)
+                    if not fresh:
+                        await active_page.wait_for_timeout(1000)
+                        fresh = await self.browser.list_conversations(active_page)
+                    if not fresh:
+                        skips.append((name, "打开会话失败"))
+                        continue
+                except Exception:
+                    skips.append((name, "打开会话失败"))
+                    continue
+            if not await self.browser.open_conversation_by_title(active_page, name):
                 skips.append((name, "打开会话失败"))
                 continue
-            messages = await self.browser.read_chat_messages(page)
+            messages = await self.browser.read_chat_messages(active_page)
             if not messages:
                 skips.append((name, "没有读到消息"))
                 continue
@@ -411,7 +458,7 @@ class AutoReplier:
                 continue
 
             try:
-                result = await self.browser.send_chat_message(page, reply)
+                result = await self.browser.send_chat_message(active_page, reply)
             except Exception as exc:
                 skips.append((name, "发送失败"))
                 await self._record(
