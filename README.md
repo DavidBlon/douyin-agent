@@ -37,28 +37,119 @@ FastAPI ─────────────── SQLite (data/agent.db)
 
 ## 环境要求
 
-- Windows 10/11
-- Python 3.12，使用 [uv](https://docs.astral.sh/uv/) 管理
-- Node.js 20+（只有改前端/重新构建时需要）
-- Google Chrome
-- 不需要 Docker、不需要数据库服务
+| 组件 | 要求 |
+| --- | --- |
+| 操作系统 | Windows 10/11（其他系统需要额外处理有头浏览器和窗口隐藏） |
+| Python | 3.12 |
+| uv | Python 包/虚拟环境管理 |
+| Node.js | 20+，仅构建前端时需要 |
+| Google Chrome | 专用登录态和页面操作使用 |
+| Git | 克隆仓库需要 |
+
+Windows 可以用 winget 安装：
+
+```powershell
+winget install Git.Git
+winget install astral-sh.uv
+winget install OpenJS.NodeJS.LTS
+winget install Google.Chrome
+```
+
+装完重开终端，确认版本：
+
+```bash
+git --version
+uv --version
+python --version
+node --version
+npm --version
+```
 
 ## 快速开始
 
+### 1. 克隆仓库
+
+```bash
+git clone https://github.com/DavidBlon/douyin-agent.git
+cd douyin-agent
+```
+
+### 2. 安装后端依赖
+
 ```bash
 uv sync
+```
 
+`uv` 会自动创建 `.venv`，不需要手动激活。
+
+### 3. 构建前端
+
+```bash
 cd web
 npm install
 npm run build
 cd ..
+```
 
+后端会直接托管 `web/dist`，生产运行不需要常驻 Vite。改了前端源码后需要重新执行这三步。
+
+### 4. 可选配置
+
+最简单的方式是启动后在设置页里填 API Key，不需要 `.env`。也可以复制环境变量模板：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+然后在 `.env` 里填：
+
+- `DEEPSEEK_API_KEY=`：模型 API Key
+- `CHROME_CHANNEL=chrome`：默认使用系统 Google Chrome
+- `HEADLESS=false`：扫码登录需要有界面，保持 false
+
+如果机器没有 Google Chrome，可以安装 Playwright 的 Chromium，并把 `CHROME_CHANNEL` 留空：
+
+```bash
+uv run playwright install chromium
+```
+
+### 5. 启动
+
+```bash
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8787
 ```
 
+或者 Windows 直接双击 `start.bat`。它调用 `scripts/start.ps1`，在 `web/dist/index.html` 不存在时会自动构建前端，然后启动服务。
+
 打开 <http://127.0.0.1:8787>。
 
-也可以直接运行 `start.bat`；`scripts/start.ps1` 会在前端尚未构建时自动安装依赖并构建。
+### 6. 首次登录和试跑
+
+1. 设置 → 模型：填 API Key，点“测试模型”。
+2. 设置 → 账号与浏览器：点“登录浏览器”，用手机扫码登录抖音。
+3. 设置 → 动作边界：先打开预演模式，额度调低。
+4. 运行台点“开始一轮”，看动作记录里的判断和草稿；确认后再关闭预演。
+
+具体配置见下方「第一次使用」。
+
+### 常见启动问题
+
+- **`uv` 找不到**：安装后重开终端，或把 `%USERPROFILE%\.local\bin` 加入 PATH。
+- **`npm` 找不到**：安装 Node.js 20+ 后重开终端。
+- **Chrome 启动失败**：安装 Google Chrome，或执行 `uv run playwright install chromium` 并清空 `CHROME_CHANNEL`。
+- **登录二维码看不到**：确认 `HEADLESS=false`，并通过设置页“登录浏览器”打开；Windows 服务方式运行时必须能在当前用户桌面/RDP 会话中显示窗口。
+- **8787 被占用**：停掉旧进程，或换一个端口启动。
+- **页面是旧的**：重新执行前端构建步骤，再刷新浏览器。
+- **更新代码**：
+
+```bash
+git pull
+uv sync
+cd web
+npm install
+npm run build
+cd ..
+```
 
 开发模式（Vite 热更新 + 后端）：
 
