@@ -472,8 +472,6 @@ input, textarea, [contenteditable="true"] {
 .switch-row p { margin-top: 2px; color: var(--dim); font-size: 10.5px; }
 .preset-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .preset-row .eyebrow { margin-right: 5px; }
-.form-hint { color: var(--dim); font-size: 10.5px; line-height: 1.6; }
-.form-hint b { color: var(--muted); font-weight: 500; }
 .inline-actions { display: flex; align-items: center; gap: 10px; }
 .test-result { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10.5px; }
 .test-result.ok { color: #8ff0c5; }

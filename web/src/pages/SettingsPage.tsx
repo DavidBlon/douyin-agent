@@ -278,15 +278,6 @@ export function SettingsPage({
               DeepSeek
             </button>
           </div>
-          <p className="form-hint">
-            MiniMax Coding Plan：Key 必须是 Coding Plan / Token Plan 页面生成的 <b>sk-cp-</b> 开头订阅 Key，
-            普通 <b>sk-api-</b> Key 不走订阅额度；Base URL 用 <b>https://api.minimax.cn/v1</b>，Group ID 留空。
-          </p>
-          <p className="form-hint">
-            DeepSeek：Base URL 用 <b>https://api.deepseek.com/v1</b>，模型 <b>deepseek-flash</b>（当前 V4.1 Flash，支持视觉，可看封面）；
-            Key 要用 DeepSeek 开放平台生成的 <b>sk-…</b>。MiniMax 的 <b>sk-cp-</b> Key 不能用于 DeepSeek，
-            切换供应商后需要重新保存对应的 Key。
-          </p>
           <div className="form-grid two">
             <label className="field">
               <span>模型</span>
