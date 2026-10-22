@@ -465,7 +465,7 @@ export default function App() {
             </dl>
             {selected.content ? (
               <div className="drawer-quote">
-                <span className="eyebrow">{selected.kind === "comment" ? "COMMENT" : selected.kind === "dm" ? "MESSAGE" : "CONTENT"}</span>
+                <span className="eyebrow">内容</span>
                 <p>{selected.content}</p>
               </div>
             ) : null}
