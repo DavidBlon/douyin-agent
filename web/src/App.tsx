@@ -343,7 +343,6 @@ export default function App() {
           <div className="brand-mark logo"><img src="/logo.png" alt="抖音智能体" /></div>
           <div>
             <strong>抖音智能体</strong>
-            <small>LOCAL · v0.1</small>
           </div>
         </div>
 
