@@ -38,8 +38,21 @@ const pageMeta: Record<Tab, string> = {
   settings: "设置",
 };
 
+const TAB_KEY = "douyin-agent-tab";
+const TABS: Tab[] = ["run", "actions", "settings"];
+
+function initialTab(): Tab {
+  try {
+    const saved = window.localStorage.getItem(TAB_KEY);
+    if (saved && TABS.includes(saved as Tab)) return saved as Tab;
+  } catch {
+    /* storage unavailable */
+  }
+  return "run";
+}
+
 export default function App() {
-  const [tab, setTab] = useState<Tab>("run");
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [status, setStatus] = useState<Status | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [actions, setActions] = useState<ActionsResponse | null>(null);
@@ -53,6 +66,14 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [bootError, setBootError] = useState("");
   const [loadingActions, setLoadingActions] = useState(false);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(TAB_KEY, tab);
+    } catch {
+      /* storage unavailable */
+    }
+  }, [tab]);
   const [toast, setToast] = useState<ToastMessage | null>(null);
 
   const toastTimer = useRef<number | undefined>(undefined);
