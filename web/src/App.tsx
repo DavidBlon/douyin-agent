@@ -3,6 +3,8 @@ import {
   Activity,
   ExternalLink,
   ListChecks,
+  PanelLeftClose,
+  PanelLeftOpen,
   Shield,
   SlidersHorizontal,
   Square,
@@ -39,6 +41,7 @@ const pageMeta: Record<Tab, string> = {
 };
 
 const TAB_KEY = "douyin-agent-tab";
+const SIDEBAR_KEY = "douyin-agent-sidebar";
 const TABS: Tab[] = ["run", "actions", "settings"];
 
 function initialTab(): Tab {
@@ -51,8 +54,17 @@ function initialTab(): Tab {
   return "run";
 }
 
+function initialSidebarCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(SIDEBAR_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>(initialTab);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(initialSidebarCollapsed);
   const [status, setStatus] = useState<Status | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [actions, setActions] = useState<ActionsResponse | null>(null);
@@ -74,6 +86,14 @@ export default function App() {
       /* storage unavailable */
     }
   }, [tab]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? "1" : "0");
+    } catch {
+      /* storage unavailable */
+    }
+  }, [sidebarCollapsed]);
   const [toast, setToast] = useState<ToastMessage | null>(null);
 
   const toastTimer = useRef<number | undefined>(undefined);
@@ -358,13 +378,26 @@ export default function App() {
   const running = Boolean(status?.running);
 
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark logo"><img src="/logo.png" alt="抖音智能体" /></div>
-          <div>
-            <strong>抖音智能体</strong>
+    <div className={`app ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+      <aside className="sidebar" id="app-sidebar">
+        <div className="sidebar-head">
+          <div className="brand">
+            <div className="brand-mark logo"><img src="/logo.png" alt="抖音智能体" /></div>
+            <div className="brand-text">
+              <strong>抖音智能体</strong>
+            </div>
           </div>
+          <button
+            className="sidebar-toggle"
+            onClick={() => setSidebarCollapsed((value) => !value)}
+            type="button"
+            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            aria-expanded={!sidebarCollapsed}
+            aria-controls="app-sidebar"
+          >
+            {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+          </button>
         </div>
 
         <nav className="nav" aria-label="主导航">
@@ -376,6 +409,8 @@ export default function App() {
                 className={`nav-item ${tab === item.tab ? "active" : ""}`}
                 onClick={() => setTab(item.tab)}
                 type="button"
+                aria-label={item.label}
+                data-label={item.label}
               >
                 <Icon size={17} />
                 <span>{item.label}</span>
@@ -385,7 +420,9 @@ export default function App() {
         </nav>
 
         <div className="sidebar-foot">
-          <div className="foot-line"><Shield size={14} /> 单账号 · 只在本机</div>
+          <div className="foot-line" title="单账号 · 只在本机">
+            <Shield size={14} /> <span>单账号 · 只在本机</span>
+          </div>
         </div>
       </aside>
 
