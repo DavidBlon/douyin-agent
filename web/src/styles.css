@@ -37,6 +37,8 @@ body {
   font-size: 13px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
   background-image:
     radial-gradient(1200px 650px at 82% -20%, rgba(255, 45, 85, 0.07), transparent 62%),
     radial-gradient(900px 520px at 4% -10%, rgba(45, 212, 191, 0.035), transparent 55%);
@@ -70,6 +72,10 @@ h1, h2, h3, p, dl, dd { margin: 0; }
 .text-link:hover { color: var(--cyan); }
 
 /* shell */
+input, textarea, [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
 .app { display: grid; grid-template-columns: 216px minmax(0, 1fr); min-height: 100vh; }
 .sidebar {
   position: sticky;
