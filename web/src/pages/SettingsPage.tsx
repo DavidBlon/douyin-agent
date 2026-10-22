@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Bot,
   Camera,
   Check,
   Chrome,
@@ -176,6 +177,22 @@ export function SettingsPage({
 
   return (
     <div className="page settings-page">
+      <section className="settings-card">
+        <header className="settings-card-head">
+          <div className="settings-title"><Bot size={17} /> 智能体</div>
+        </header>
+        <label className="field">
+          <span>角色名字</span>
+          <input
+            className="input"
+            value={form.agent_name}
+            maxLength={40}
+            onChange={(e) => set("agent_name", e.target.value)}
+            placeholder="例如：小助手"
+          />
+        </label>
+      </section>
+
       <section className="settings-card">
         <header className="settings-card-head">
           <div className="settings-title"><Chrome size={17} /> 账号与浏览器</div>

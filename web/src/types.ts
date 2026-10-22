@@ -77,6 +77,7 @@ export interface Settings {
   share_max_per_run: number;
   share_min_score: number;
   silent_browser: boolean;
+  agent_name: string;
   persona: string;
   topics: string;
   dm_allowlist: string[];

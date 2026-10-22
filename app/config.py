@@ -80,6 +80,7 @@ class AgentSettings(BaseModel):
     share_min_score: float = Field(default=0.7, ge=0, le=1)
     silent_browser: bool = True
 
+    agent_name: str = Field(default="", max_length=40)
     persona: str = (
         "克制、具体、像真人。不要恭维，不要堆网络烂梗，不要推销，"
         "不透露个人隐私，不替任何人做承诺。评论最多两行。"

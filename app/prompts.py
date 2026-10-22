@@ -6,6 +6,16 @@ from typing import Any
 from . import db
 from .config import AgentSettings
 
+
+def _identity(settings: AgentSettings) -> str:
+    name = (settings.agent_name or "").strip()
+    if not name:
+        return ""
+    return "【角色名字】\n" + (
+        f"你的名字是「{name}」。谈到自己时使用这个名字，不要冒充别人。\n\n"
+    )
+
+
 SYSTEM_PROMPT = """你是用户本人的抖音账号助理，工作方式是“看一条、判断一条、必要时互动”。
 你只输出 JSON，不输出解释性前后缀。
 
@@ -25,7 +35,7 @@ SYSTEM_PROMPT = """你是用户本人的抖音账号助理，工作方式是“�
 - 不写链接、手机号、微信号、二维码、导流话术。
 - 不复用同一句话；不要每条都用同样的开头。
 
-【用户人设】
+{identity}【用户人设】
 {persona}
 
 【关注方向】
@@ -98,6 +108,7 @@ def build_messages(
     system = SYSTEM_PROMPT.format(
         max_comment=settings.max_comment_chars,
         max_dm=settings.max_dm_chars,
+        identity=_identity(settings),
         persona=settings.persona.strip(),
         topics=settings.topics.strip(),
     )
@@ -145,7 +156,7 @@ REPLY_SYSTEM = """你在替用户本人回复抖音上的私信或评论。你�
 - 评论回复最多 {max_comment} 字，1~2 句。
 - 中文，口语化，不要堆网络烂梗。
 
-【用户人设】
+{identity}【用户人设】
 {persona}
 
 【关注方向】
@@ -279,6 +290,7 @@ def build_reply_messages(
     system = REPLY_SYSTEM.format(
         max_dm=settings.max_dm_chars,
         max_comment=settings.max_comment_chars,
+        identity=_identity(settings),
         persona=settings.persona.strip(),
         topics=settings.topics.strip(),
     )
