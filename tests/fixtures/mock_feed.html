@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Mock Douyin feed</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0b0d10; color: #eee; font-family: sans-serif; }
+  .feed-section { min-height: 100vh; display: flex; align-items: center; justify-content: center; position: relative; border-bottom: 1px solid #222; }
+  .card { width: 900px; display: grid; grid-template-columns: 620px 1fr; gap: 24px; align-items: start; }
+  video { width: 620px; height: 350px; background: #18202b; display: block; }
+  .rail { display: flex; flex-direction: column; gap: 14px; padding-top: 20px; }
+  .rail button { background: #151920; color: #eee; border: 1px solid #2a3039; border-radius: 8px; padding: 10px 14px; font-size: 18px; cursor: pointer; text-align: left; }
+  .rail button[aria-pressed="true"] { border-color: #ff2d55; color: #ff8aa0; }
+  .desc { font-size: 18px; line-height: 1.6; margin: 0 0 8px; }
+  .author { color: #9aa3af; text-decoration: none; }
+  .video-link { color: #5eead4; font-size: 13px; }
+  .comments { position: absolute; right: 40px; top: 40px; bottom: 40px; width: 360px; background: #11151b; border: 1px solid #2a3039; border-radius: 10px; padding: 14px; display: none; flex-direction: column; gap: 10px; overflow: auto; }
+  .comments.open { display: flex; }
+  .comment-item { font-size: 13px; color: #c7ccd4; border-bottom: 1px solid #20252d; padding-bottom: 8px; }
+  [data-e2e="comment-input"] { min-height: 44px; padding: 10px; border: 1px solid #343b47; border-radius: 6px; color: #fff; background: #0b0e12; }
+  [data-e2e="comment-send"] { align-self: flex-end; background: #ff2d55; color: white; border: 0; border-radius: 6px; padding: 8px 16px; cursor: pointer; }
+</style>
+</head>
+<body>
+<section class="feed-section" id="s1">
+  <div class="card">
+    <video muted playsinline></video>
+    <img style="display:none" src="https://p3-pc-sign.douyinpic.com/obj/tos-cn-i-tsj2vxp0zn/fake_emoji.webp" alt="">
+    <img style="display:none" src="https://p3-pc-sign.douyinpic.com/tos-cn-p-0015/fake_cover~tplv-dy-360p.jpeg?biz_tag=pcweb_cover" alt="">
+    <div class="rail">
+      <p class="desc" data-e2e="video-desc">一条关于“如何把复杂问题拆成可执行步骤”的视频。作者讲了三个真实项目里的取舍，不是空泛鸡汤。</p>
+      <a class="author" href="/user/author1">作者甲</a>
+      <a class="video-link" href="/video/123456">打开视频</a>
+      <button data-e2e="like-icon" aria-pressed="false" onclick="toggleLike(this)">♡ 点赞 <span data-e2e="like-count">1.2万</span></button>
+      <button data-e2e="comment-icon" onclick="toggleComments(this)">评论 <span data-e2e="comment-count">321</span></button>
+    </div>
+    <div class="comments" data-e2e="comment-list">
+      <div class="comment-item" data-e2e="comment-item">用户A：这个拆解方法我上周刚踩过坑，受教了。</div>
+      <div class="comment-item" data-e2e="comment-item">用户B：第三个例子有具体数据吗？</div>
+      <div data-e2e="comment-input" contenteditable="true" aria-label="评论输入"></div>
+      <button data-e2e="comment-send" onclick="sendComment(this)">发送</button>
+    </div>
+  </div>
+</section>
+
+<section class="feed-section" id="s2">
+  <div class="card">
+    <video muted playsinline></video>
+    <img style="display:none" src="https://p3-pc-sign.douyinpic.com/obj/tos-cn-i-tsj2vxp0zn/fake_emoji.webp" alt="">
+    <img style="display:none" src="https://p3-pc-sign.douyinpic.com/tos-cn-p-0015/fake_cover~tplv-dy-360p.jpeg?biz_tag=pcweb_cover" alt="">
+    <div class="rail">
+      <p class="desc" data-e2e="video-desc">第二条视频在聊城市骑行路线，画面里有具体的路口和补给点。</p>
+      <a class="author" href="/user/author2">作者乙</a>
+      <a class="video-link" href="/video/654321">打开视频</a>
+      <button data-e2e="like-icon" aria-pressed="false" onclick="toggleLike(this)">♡ 点赞 <span data-e2e="like-count">88</span></button>
+      <button data-e2e="comment-icon" onclick="toggleComments(this)">评论 <span data-e2e="comment-count">12</span></button>
+    </div>
+    <div class="comments" data-e2e="comment-list">
+      <div class="comment-item" data-e2e="comment-item">用户C：求路线文件。</div>
+      <div class="comment-item" data-e2e="comment-item">用户D：这段路夏天太晒了。</div>
+      <div data-e2e="comment-input" contenteditable="true" aria-label="评论输入"></div>
+      <button data-e2e="comment-send" onclick="sendComment(this)">发送</button>
+    </div>
+  </div>
+</section>
+
+<script>
+  function toggleLike(btn) {
+    const pressed = btn.getAttribute('aria-pressed') === 'true';
+    btn.setAttribute('aria-pressed', pressed ? 'false' : 'true');
+    const count = btn.querySelector('[data-e2e="like-count"]');
+    if (count) count.textContent = pressed ? '1.2万' : '1.2万+1';
+  }
+  function toggleComments(btn) {
+    const panel = btn.closest('.card').querySelector('.comments');
+    panel.classList.toggle('open');
+    const input = panel.querySelector('[data-e2e="comment-input"]');
+    if (panel.classList.contains('open') && input) input.focus();
+  }
+  function sendComment(btn) {
+    const panel = btn.closest('.comments');
+    const input = panel.querySelector('[data-e2e="comment-input"]');
+    const text = (input.innerText || '').trim();
+    if (!text) return;
+    const item = document.createElement('div');
+    item.className = 'comment-item';
+    item.setAttribute('data-e2e', 'comment-item');
+    item.textContent = '我：' + text;
+    panel.insertBefore(item, input);
+    input.innerText = '';
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      document.querySelectorAll('.comments.open').forEach(p => p.classList.remove('open'));
+    }
+  });
+</script>
+</body>
+</html>

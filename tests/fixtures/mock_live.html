@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Mock live</title>
+<style>
+  html, body { margin: 0; background: #0b0d10; color: #eee; font-family: sans-serif; }
+  .feed { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  video { width: 620px; height: 350px; background: #18202b; display: block; }
+  .desc { font-size: 18px; }
+</style>
+</head>
+<body>
+<div class="feed">
+  <div data-e2e="feed-active-video">
+    <video muted playsinline></video>
+    <p class="desc" data-e2e="video-desc">直播中：今天的聊天</p>
+    <a class="author" href="/user/livehost">直播作者</a>
+  </div>
+</div>
+</body>
+</html>
