@@ -7,7 +7,7 @@ from typing import Any
 
 from playwright.async_api import Page
 
-from . import db, policy
+from . import chat, db, policy
 from .agent import AgentRunner
 from .browser import ActionError, BrowserManager, LoginRequired, RiskControl
 from .config import AgentSettings, load_api_key
@@ -203,6 +203,8 @@ class AutoReplier:
             if str(row.get("name") or "").strip()
         }
         conversations = await self.browser.list_conversations(page)
+        if conversations:
+            chat.remember_conversations(conversations)
         if not conversations:
             await bus.emit(
                 "reply",

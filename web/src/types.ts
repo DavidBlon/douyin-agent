@@ -128,6 +128,72 @@ export interface ReplierStatus {
   today: { dm: number; comment: number };
 }
 
+export interface ChatConversation {
+  key: string;
+  index: number;
+  title: string;
+  preview: string;
+  unread: number;
+  is_group: boolean;
+  avatar: string;
+  time: string;
+}
+
+export interface ChatMedia {
+  kind: "video" | "image" | "emoji";
+  url: string;
+  cover?: string;
+  video_url?: string;
+  width?: number;
+  height?: number;
+  duration?: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  text: string;
+  time: string;
+  incoming: boolean;
+  avatar: string;
+  media: ChatMedia[];
+  system: boolean;
+}
+
+export interface ChatSummary {
+  ok: boolean;
+  unread_total: number;
+  conversation_count: number;
+  updated_at: string;
+  age_sec: number | null;
+  error: string;
+  page_open: boolean;
+}
+
+export interface ChatConversationsResponse extends ChatSummary {
+  conversations: ChatConversation[];
+  cached: boolean;
+}
+
+export interface ChatMessagesResponse {
+  ok: boolean;
+  conversation: ChatConversation;
+  messages: ChatMessage[];
+}
+
+export interface ChatSendResponse extends ChatMessagesResponse {
+  status: string;
+  detail: string;
+  action_id?: number;
+}
+
+export interface ChatVideoResponse {
+  ok: boolean;
+  video_url: string;
+  cover: string;
+  page_url: string;
+  cached: boolean;
+}
+
 export interface Action {
   id: number;
   kind: ActionKind;

@@ -14,6 +14,7 @@ from sse_starlette.sse import EventSourceResponse
 from . import db
 from .agent import runner
 from .browser import BrowserError, LoginRequired, RiskControl
+from .chat import ChatBusy, cache_summary, chat as chat_service
 from .config import (
     DEBUG_DIR,
     MEDIA_DIR,
@@ -37,7 +38,12 @@ async def lifespan(app: FastAPI):
     db.init_db()
     await replier.apply_settings()
     await sharer.apply_settings()
+    await chat_service.start()
     yield
+    try:
+        await chat_service.stop()
+    except Exception:
+        pass
     try:
         await replier.stop()
     except Exception:
@@ -86,6 +92,26 @@ class ShareOnDemandBody(BaseModel):
 class FollowFanBody(BaseModel):
     name: str = Field(default="", max_length=120)
     profile_url: str = Field(default="", max_length=500)
+
+
+class ChatSendBody(BaseModel):
+    key: str = Field(default="", max_length=80)
+    text: str = Field(default="", max_length=500)
+
+
+class ChatVideoBody(BaseModel):
+    key: str = Field(default="", max_length=80)
+    cover: str = Field(default="", max_length=1200)
+
+
+def _chat_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, LoginRequired):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, (ChatBusy, RiskControl)):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, BrowserError):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail=f"私信操作失败：{str(exc)[:200]}")
 
 
 @app.get("/api/health")
@@ -217,6 +243,61 @@ async def replier_check() -> dict[str, Any]:
     if not db.load_settings().auto_reply:
         raise HTTPException(status_code=400, detail="先在设置里开启自动回复")
     return await replier.check_once()
+
+
+@app.get("/api/chat/summary")
+async def chat_summary() -> dict[str, Any]:
+    return cache_summary()
+
+
+@app.get("/api/chat/conversations")
+async def chat_conversations(refresh: bool = Query(default=False)) -> dict[str, Any]:
+    try:
+        return await chat_service.conversations(refresh=refresh)
+    except Exception as exc:
+        raise _chat_error(exc) from exc
+
+
+@app.get("/api/chat/messages")
+async def chat_messages(key: str = Query(min_length=1, max_length=80)) -> dict[str, Any]:
+    try:
+        return await chat_service.messages(key)
+    except Exception as exc:
+        raise _chat_error(exc) from exc
+
+
+@app.post("/api/chat/send")
+async def chat_send(body: ChatSendBody) -> dict[str, Any]:
+    key = body.key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="缺少会话")
+    try:
+        return await chat_service.send(key, body.text)
+    except Exception as exc:
+        raise _chat_error(exc) from exc
+
+
+@app.post("/api/chat/close")
+async def chat_close() -> dict[str, Any]:
+    await chat_service.close()
+    return {"ok": True}
+
+
+@app.post("/api/chat/leave")
+async def chat_leave() -> dict[str, Any]:
+    await chat_service.leave()
+    return {"ok": True}
+
+
+@app.post("/api/chat/video")
+async def chat_video(body: ChatVideoBody) -> dict[str, Any]:
+    key = body.key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="缺少会话")
+    try:
+        return await chat_service.resolve_video(key, body.cover)
+    except Exception as exc:
+        raise _chat_error(exc) from exc
 
 
 @app.post("/api/share/check")

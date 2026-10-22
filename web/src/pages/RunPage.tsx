@@ -25,6 +25,7 @@ import {
 import { api } from "../api";
 import type { AgentEvent, Fan, FansResponse, RunProgress, Settings, Status, Video } from "../types";
 import { EmptyState, QuotaBar, TypeBadge, Toggle } from "../components/ui";
+import { ChatDock } from "../components/ChatDock";
 
 interface RunPageProps {
   status: Status | null;
@@ -659,6 +660,7 @@ export function RunPage({
       </div>
 
       <FansPanel loggedIn={logged} onOpenBrowser={onOpenBrowser} />
+      <ChatDock />
     </div>
   );
 }

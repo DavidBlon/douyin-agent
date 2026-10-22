@@ -2,6 +2,11 @@ import type {
   ActionsResponse,
   ActionKind,
   AgentEvent,
+  ChatConversationsResponse,
+  ChatMessagesResponse,
+  ChatSendResponse,
+  ChatSummary,
+  ChatVideoResponse,
   FansResponse,
   FollowFanResponse,
   Settings,
@@ -45,6 +50,22 @@ export const api = {
   run: () => request<{ ok: boolean; accepted: boolean }>("/api/run", { method: "POST" }),
   stop: () => request<{ ok: boolean }>("/api/stop", { method: "POST" }),
   checkReplier: () => request<{ ok: boolean; dm?: number; comment?: number; skipped?: string }>("/api/replier/check", { method: "POST" }),
+  chatSummary: () => request<ChatSummary>("/api/chat/summary"),
+  chatConversations: (refresh = false) =>
+    request<ChatConversationsResponse>(`/api/chat/conversations?refresh=${refresh ? 1 : 0}`),
+  chatMessages: (key: string) =>
+    request<ChatMessagesResponse>(`/api/chat/messages?key=${encodeURIComponent(key)}`),
+  chatSend: (key: string, text: string) =>
+    request<ChatSendResponse>("/api/chat/send", {
+      method: "POST",
+      body: JSON.stringify({ key, text }),
+    }),
+  chatVideo: (key: string, cover: string) =>
+    request<ChatVideoResponse>("/api/chat/video", {
+      method: "POST",
+      body: JSON.stringify({ key, cover }),
+    }),
+  chatLeave: () => request<{ ok: boolean }>("/api/chat/leave", { method: "POST" }),
   checkSharer: () => request<{ ok: boolean; shared?: number; scanned?: number; skipped?: string }>("/api/share/check", { method: "POST" }),
   openBrowser: () => request<{ started: boolean; logged_in: boolean; headless?: boolean; url?: string; last_error?: string }>("/api/browser/open", { method: "POST" }),
   hideBrowser: () => request<{ started: boolean; logged_in: boolean }>("/api/browser/hide", { method: "POST" }),

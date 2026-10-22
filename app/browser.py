@@ -464,6 +464,7 @@ CONVERSATIONS_JS = r"""
     const titleEl = el.querySelector('.conversationConversationItemtitle');
     const previewEl = el.querySelector('.ConversationItemHinttextBox');
     const unreadEl = el.querySelector('.ConversationItemUnReadCount');
+    const timeEl = el.querySelector('[class*="ConversationItem"] [class*="time"], [class*="ConversationItem"] [class*="Time"], [class*="conversation"] [class*="time"]');
     const img = el.querySelector('img');
     const title = clean(titleEl && titleEl.innerText);
     if (!title) return;
@@ -477,6 +478,7 @@ CONVERSATIONS_JS = r"""
       is_group: !!el.querySelector('.commonConversationIconnoDrag') || title.includes('群'),
       visible: r.width > 0 && r.height > 0,
       avatar: (img && img.src) || '',
+      time: clean(timeEl && timeEl.innerText).slice(0, 24),
     });
   });
   return out;
@@ -499,6 +501,83 @@ CHAT_MESSAGES_JS = r"""
       avatar: (img && img.src) || '',
     };
   }).filter(x => x.text);
+}
+"""
+
+CHAT_TRANSCRIPT_JS = r"""
+() => {
+  const clean = s => (s || '').replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  const list = document.querySelector('.messageMessageListlist') || document;
+  const listRect = list.getBoundingClientRect();
+  const outerOf = el => el.closest('.messageMessageBoxmessageBox') || el.closest('[class*="messageMessageBox"]') || el;
+  const isAvatarImg = img => {
+    const cls = typeof img.className === 'string' ? img.className : '';
+    return /avatar/i.test(cls) || !!img.closest('[class*="authorAvatar"]');
+  };
+  const items = [...list.querySelectorAll('[data-e2e="msg-item-content"]')].map((el, index) => {
+    const outer = outerOf(el);
+    const timeEl = outer.querySelector('.MessageBoxTimetimeLayout');
+    const contentRect = el.getBoundingClientRect();
+    const images = [...el.querySelectorAll('img')]
+      .filter(img => !isAvatarImg(img))
+      .map(img => {
+        const r = img.getBoundingClientRect();
+        return {
+          url: img.currentSrc || img.src || '',
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+          nw: img.naturalWidth || 0,
+          nh: img.naturalHeight || 0,
+        };
+      }).filter(x => x.url && !x.url.startsWith('data:'));
+    const videos = [...el.querySelectorAll('video')].map(v => ({
+      src: v.currentSrc || v.src || '',
+      poster: v.poster || '',
+      duration: Number.isFinite(v.duration) ? Math.round(v.duration) : 0,
+      w: Math.round(v.getBoundingClientRect().width),
+      h: Math.round(v.getBoundingClientRect().height),
+    }));
+    const links = [...el.querySelectorAll('a[href]')].map(a => a.href).filter(Boolean).slice(0, 4);
+    const avatarImg = [...outer.querySelectorAll('img')].find(img => !el.contains(img) && img.src && !isAvatarImg(img));
+    const senderAvatar = [...outer.querySelectorAll('img')].find(img => !el.contains(img) && img.src);
+    const hasPlay = !!el.querySelector('[class*="play" i], [class*="Play"], [aria-label*="播放"], svg[class*="play" i]');
+    const hasVideo = videos.length > 0 || hasPlay || !!el.querySelector('.MessageItemShareAwemecontainer') || [...el.querySelectorAll('[class*="video" i]')].length > 0;
+    const videoLink = links.find(u => /\/video\/|\/note\//.test(u)) || '';
+    return {
+      index,
+      top: Math.round(contentRect.top),
+      text: clean(el.innerText),
+      time: clean(timeEl && timeEl.innerText),
+      avatar: (senderAvatar && senderAvatar.src) || (avatarImg && avatarImg.src) || '',
+      mine: contentRect.width > 0 && (contentRect.left + contentRect.width / 2) > (listRect.left + listRect.width / 2),
+      images,
+      videos,
+      links,
+      is_video: hasVideo || !!videoLink,
+      video_link: videoLink,
+      is_system: false,
+    };
+  });
+  const systems = [...list.querySelectorAll('.messageMessageBoxisFullRowCenterMessage')].map((el, index) => {
+    const outer = outerOf(el);
+    const timeEl = outer.querySelector('.MessageBoxTimetimeLayout');
+    const r = el.getBoundingClientRect();
+    return {
+      index: 10000 + index,
+      top: Math.round(r.top),
+      text: clean(el.innerText),
+      time: clean(timeEl && timeEl.innerText),
+      avatar: '',
+      mine: false,
+      images: [],
+      videos: [],
+      links: [],
+      is_video: false,
+      video_link: '',
+      is_system: true,
+    };
+  }).filter(x => x.text);
+  return [...items, ...systems];
 }
 """
 
@@ -575,6 +654,12 @@ class BrowserManager:
     async def ensure_started(self) -> None:
         if self.context and self.page and not self.page.is_closed():
             return
+        if self.context:
+            try:
+                await self.context.cookies("https://www.douyin.com")
+            except Exception:
+                self.context = None
+                self.page = None
         await self.start()
 
     async def ensure_feed(self) -> None:
@@ -995,6 +1080,10 @@ class BrowserManager:
     async def open_conversation(self, page: Page, index: int) -> bool:
         loc = page.locator('[data-e2e="conversation-item"]').nth(index)
         try:
+            await loc.scroll_into_view_if_needed(timeout=1500)
+        except Exception:
+            pass
+        try:
             if not await loc.is_visible():
                 return False
             await loc.click()
@@ -1003,12 +1092,46 @@ class BrowserManager:
         await page.wait_for_timeout(1300)
         return True
 
+    async def open_conversation_by_title(self, page: Page, title: str) -> bool:
+        wanted = (title or "").strip()
+        if not wanted:
+            return False
+        items = page.locator('[data-e2e="conversation-item"]')
+        try:
+            count = await items.count()
+        except Exception:
+            return False
+        for index in range(count):
+            item = items.nth(index)
+            try:
+                title_el = item.locator('.conversationConversationItemtitle')
+                if not await title_el.count():
+                    continue
+                if (await title_el.inner_text()).strip() != wanted:
+                    continue
+                await item.scroll_into_view_if_needed(timeout=2000)
+                if not await item.is_visible():
+                    continue
+                await item.click()
+                await page.wait_for_timeout(1300)
+                return True
+            except Exception:
+                continue
+        return False
+
     async def read_chat_messages(self, page: Page) -> list[dict[str, Any]]:
         try:
             data = await page.evaluate(CHAT_MESSAGES_JS)
         except Exception:
             return []
         return [dict(x) for x in (data or []) if isinstance(x, dict) and str(x.get("text") or "").strip()]
+
+    async def read_chat_transcript(self, page: Page) -> list[dict[str, Any]]:
+        try:
+            data = await page.evaluate(CHAT_TRANSCRIPT_JS)
+        except Exception:
+            return []
+        return [dict(x) for x in (data or []) if isinstance(x, dict)]
 
     async def send_chat_message(self, page: Page, text: str) -> dict[str, Any]:
         box = await self._find_visible_in(page, selectors.DM_INPUT, prefer_last=True)
@@ -1842,12 +1965,13 @@ class BrowserManager:
                 shot_path = self._shots / f"dm_missing_{_now_tag()}.png"
                 await page.screenshot(path=str(shot_path))
                 raise ActionError(f"作者页没有找到私信按钮。截图：/media/shots/{shot_path.name}")
+            before_pages = set(self.context.pages)
             await btn.click()
             await page.wait_for_timeout(1000)
-            # 私信可能开在当前页，也可能开了新页面
-            newest = self.context.pages[-1] if self.context.pages else page
-            if newest is not page:
-                active = newest
+            # 私信可能开在当前页，也可能开了新页面；只认这次点击新开的页面。
+            opened = [p for p in self.context.pages if p not in before_pages]
+            if opened:
+                active = opened[-1]
                 await active.wait_for_timeout(700)
             box = await self._find_visible_in(active, selectors.DM_INPUT, prefer_last=True)
             if not box:
