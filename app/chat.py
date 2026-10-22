@@ -285,6 +285,7 @@ class ChatService:
         self._page: Page | None = None
         self._current_key = ""
         self._last_activity = 0.0
+        self._needs_fresh_page = False
         self._op_lock = asyncio.Lock()
         self._monitor: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -383,12 +384,26 @@ class ChatService:
         page = self._page
         self._page = None
         self._current_key = ""
+        self._needs_fresh_page = False
         clear_active()
         if page is not None and not page.is_closed():
             try:
                 await page.close()
             except Exception:
                 pass
+
+    async def _dismiss_overlays(self, page: Page) -> None:
+        for _ in range(2):
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            await page.wait_for_timeout(160)
+        try:
+            await page.mouse.move(6, 6)
+        except Exception:
+            pass
+        await page.wait_for_timeout(150)
 
     async def close(self) -> None:
         async with self._op_lock:
@@ -459,10 +474,14 @@ class ChatService:
         return None
 
     async def _open(self, key: str) -> tuple[dict[str, Any], list[dict[str, Any]], Page]:
+        if self._needs_fresh_page:
+            await self._close_page()
+            self._needs_fresh_page = False
         page = await self._ensure_page()
         if page is None:
             raise ActionError("浏览器页面不可用")
         if self._current_key != key:
+            await self._dismiss_overlays(page)
             await self._list_raw(page)
         target = await self._find(key)
         if target is None:
@@ -471,7 +490,10 @@ class ChatService:
         if target is None:
             raise ActionError("会话不存在或列表已更新")
         if self._current_key != key:
-            if not await self.browser.open_conversation_by_title(page, str(target.get("title") or "")):
+            opened = await self.browser.open_conversation_by_title(page, str(target.get("title") or ""))
+            if not opened:
+                opened = await self.browser.open_conversation(page, int(target.get("index") or 0))
+            if not opened:
                 raise ActionError("打开会话失败")
             await page.wait_for_timeout(1000)
             self._current_key = key
@@ -648,6 +670,7 @@ class ChatService:
                     await page.wait_for_timeout(450)
                 except Exception:
                     pass
+                self._needs_fresh_page = True
                 if video_url:
                     _VIDEO_CACHE[cover_base] = (time.monotonic(), video_url)
                 self._last_activity = time.monotonic()

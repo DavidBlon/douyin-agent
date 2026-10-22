@@ -1077,17 +1077,33 @@ class BrowserManager:
             return []
         return [dict(x) for x in (data or []) if isinstance(x, dict)]
 
+    async def _click_conversation_row(self, page: Page, item) -> bool:
+        try:
+            await item.scroll_into_view_if_needed(timeout=2000)
+            box = await item.bounding_box()
+            if not box:
+                return False
+            await page.evaluate(
+                "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = 'none'; }"
+            )
+            # 顶部栏的悬浮层会盖住较低的会话行，点击期间临时让 header 穿透。
+            try:
+                await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            finally:
+                try:
+                    await page.evaluate(
+                        "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = ''; }"
+                    )
+                except Exception:
+                    pass
+            return True
+        except Exception as exc:
+            print(f"[chat] click conversation row failed: {str(exc)[:240]!r}", flush=True)
+            return False
+
     async def open_conversation(self, page: Page, index: int) -> bool:
         loc = page.locator('[data-e2e="conversation-item"]').nth(index)
-        try:
-            await loc.scroll_into_view_if_needed(timeout=1500)
-        except Exception:
-            pass
-        try:
-            if not await loc.is_visible():
-                return False
-            await loc.click()
-        except Exception:
+        if not await self._click_conversation_row(page, loc):
             return False
         await page.wait_for_timeout(1300)
         return True
@@ -1101,22 +1117,33 @@ class BrowserManager:
             count = await items.count()
         except Exception:
             return False
+        exact: list[int] = []
+        loose: list[int] = []
         for index in range(count):
-            item = items.nth(index)
             try:
-                title_el = item.locator('.conversationConversationItemtitle')
+                title_el = items.nth(index).locator('.conversationConversationItemtitle')
                 if not await title_el.count():
                     continue
-                if (await title_el.inner_text()).strip() != wanted:
-                    continue
-                await item.scroll_into_view_if_needed(timeout=2000)
-                if not await item.is_visible():
-                    continue
-                await item.click()
-                await page.wait_for_timeout(1300)
-                return True
+                name = (await title_el.inner_text()).strip()
             except Exception:
                 continue
+            if name == wanted:
+                exact.append(index)
+            elif wanted and (wanted in name or name in wanted):
+                loose.append(index)
+        for index in exact + loose:
+            item = items.nth(index)
+            if not await self._click_conversation_row(page, item):
+                continue
+            for _ in range(16):
+                await page.wait_for_timeout(250)
+                try:
+                    header = (await page.locator('.StackLayoutStackChatHeadertitle').first.inner_text()).strip()
+                except Exception:
+                    header = ""
+                if header and (header == wanted or wanted in header):
+                    return True
+        print(f"[chat] open conversation failed title={wanted!r} count={count} exact={exact} loose={loose}", flush=True)
         return False
 
     async def read_chat_messages(self, page: Page) -> list[dict[str, Any]]:
