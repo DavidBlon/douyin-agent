@@ -1,4 +1,4 @@
-export type Tab = "run" | "actions" | "settings";
+export type Tab = "run" | "content" | "analytics" | "crm" | "actions" | "settings";
 export type ActionKind = "like" | "comment" | "dm" | "publish" | "reply_dm" | "reply_comment" | "share" | "follow" | "unfollow";
 export type ActionStatus =
   | "running"
@@ -53,6 +53,12 @@ export interface Settings {
   auto_comment: boolean;
   auto_dm: boolean;
   auto_publish: boolean;
+  publish_require_approval: boolean;
+  auto_operate: boolean;
+  auto_content: boolean;
+  auto_video: boolean;
+  content_generate_time: string;
+  publish_time: string;
   max_videos_per_run: number;
   likes_per_day: number;
   comments_per_day: number;
@@ -80,6 +86,8 @@ export interface Settings {
   agent_name: string;
   persona: string;
   topics: string;
+  content_pillars: string;
+  crm_auto_tag: boolean;
   dm_allowlist: string[];
   comment_blocklist: string[];
   model: string;
@@ -104,6 +112,141 @@ export interface Status {
   last_decision: Decision | null;
   replier?: ReplierStatus;
   sharer?: SharerStatus;
+  analytics?: AnalyticsStatus;
+  publisher?: PublisherStatus;
+  planner?: PlannerStatus;
+  operator?: OperatorStatus;
+  crm?: CrmOverview;
+}
+
+export interface PlannerStatus {
+  enabled: boolean;
+  running: boolean;
+  busy: boolean;
+  last_check: string;
+  last_error: string;
+  last_result: Record<string, unknown>;
+}
+
+export interface OperatorStatus {
+  enabled: boolean;
+  running: boolean;
+  busy: boolean;
+  interval_min: number;
+  last_error: string;
+  last_result: Record<string, unknown>;
+}
+
+export interface AnalyticsStatus {
+  busy: boolean;
+  last_refresh: string;
+  last_error: string;
+  last_result: { works?: number; followers?: number; [key: string]: unknown };
+}
+
+export interface PublisherStatus {
+  enabled: boolean;
+  running: boolean;
+  busy: boolean;
+  last_error: string;
+  last_result: Record<string, unknown>;
+}
+
+export interface AnalyticsWork {
+  aweme_id: string;
+  title: string;
+  cover: string;
+  url: string;
+  kind: string;
+  published_at: string;
+  stats_day?: string;
+  plays?: number;
+  likes?: number;
+  comments?: number;
+  shares?: number;
+  favorites?: number;
+}
+
+export interface AnalyticsOverview {
+  ok: boolean;
+  account: {
+    day: string;
+    followers: number;
+    following: number;
+    likes: number;
+    works: number;
+  };
+  totals: { plays: number; likes: number; comments: number; shares: number };
+  work_count: number;
+  works: AnalyticsWork[];
+  trend: { day: string; plays: number; likes: number; comments: number; shares: number }[];
+  updated_at: string;
+  status?: AnalyticsStatus;
+}
+
+export interface ComplianceIssue {
+  code: string;
+  message: string;
+}
+
+export interface ComplianceReport {
+  ok?: boolean;
+  blocking?: ComplianceIssue[];
+  warnings?: ComplianceIssue[];
+  checked_at?: string;
+}
+
+export interface ContentPlan {
+  id: number;
+  plan_date: string;
+  slot: string;
+  pillar: string;
+  topic: string;
+  angle: string;
+  script: string;
+  caption: string;
+  hashtags: string[];
+  cover_text: string;
+  cover_bg: string;
+  cover_path: string;
+  cover_url: string;
+  video_path: string;
+  video_url: string;
+  music_note: string;
+  source_notes: string;
+  status: string;
+  compliance: ComplianceReport;
+  publish_at: string;
+  aweme_id: string;
+  error: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Contact {
+  target_key: string;
+  name: string;
+  avatar: string;
+  tags: string[];
+  stage: string;
+  note: string;
+  score: number;
+  last_incoming: string;
+  last_reply: string;
+  last_seen: string;
+  updated_at: string;
+}
+
+export interface CrmOverview {
+  total: number;
+  stages: Record<string, number>;
+  recent: Contact[];
+}
+
+export interface CrmContactsResponse {
+  ok: boolean;
+  items: Contact[];
+  overview: CrmOverview;
 }
 
 export interface SharerStatus {

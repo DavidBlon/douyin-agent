@@ -63,7 +63,7 @@ class FakeBrowser:
 
 
 def make_runner(browser: FakeBrowser):
-    return SimpleNamespace(browser=browser, running=False, exclusive=asyncio.Lock())
+    return SimpleNamespace(browser=browser, running=False, run_pending=False, exclusive=asyncio.Lock())
 
 
 class FakePage:
@@ -148,3 +148,38 @@ async def test_replier_skips_groups_and_strangers(temp_db, monkeypatch):
     assert handled == 0
     assert browser.opened == 0
     assert browser.sent == []
+
+
+def test_has_new_message_only_trusts_unread_badge(temp_db):
+    agent = replier_mod.AutoReplier(make_runner(FakeBrowser()))
+    item = conv(unread=0, preview="在吗")
+    assert agent._has_new_message({**item, "unread": 2}) is True
+    assert agent._has_new_message(item) is False
+    assert agent._has_new_message({**item, "preview": "你在忙吗"}) is False
+
+
+@pytest.mark.asyncio
+async def test_replier_manual_check_queues_when_browser_busy(temp_db):
+    db.save_settings(AgentSettings(auto_reply=True, dry_run=True))
+    runner = make_runner(FakeBrowser())
+    runner.running = True
+    agent = replier_mod.AutoReplier(runner)
+
+    result = await agent.check_once(manual=True)
+    assert result["queued"] is True
+    assert "已排队" in result["detail"]
+    assert agent._manual_until > 0
+
+    auto = await agent.check_once()
+    assert auto["skipped"] == "run_in_progress"
+
+
+@pytest.mark.asyncio
+async def test_replier_manual_check_queues_while_cycle_busy(temp_db):
+    db.save_settings(AgentSettings(auto_reply=True, dry_run=True))
+    agent = replier_mod.AutoReplier(make_runner(FakeBrowser()))
+    agent.busy = True
+
+    result = await agent.check_once(manual=True)
+    assert result["queued"] is True
+    assert "正在检查" in result["detail"]

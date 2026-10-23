@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,27 @@ UNFOLLOW_STATE_JS = r"""
     followable: hits.includes('关注'),
     hits,
   };
+}
+"""
+
+FOLLOW_BUTTON_JS = r"""
+() => {
+  const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+  const out = [];
+  for (const el of document.querySelectorAll('button,[role="button"],div,span')) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 10 || r.height < 10 || r.left < innerWidth * 0.5 || r.top < 0 || r.top > 320) continue;
+    const text = clean(el.innerText);
+    if (!['关注', '回关'].includes(text)) continue;
+    if ([...el.children].some(c => clean(c.innerText) === text)) continue;
+    out.push({el, area: r.width * r.height});
+  }
+  out.sort((a, b) => a.area - b.area);
+  const found = out[0];
+  if (!found) return false;
+  const button = found.el.closest('button,[role="button"]') || found.el;
+  button.setAttribute('data-dy-agent-follow-profile', '1');
+  return true;
 }
 """
 
@@ -448,6 +470,84 @@ RELATION_JS = r"""
 }
 """
 
+NAV_BADGES_JS = r"""
+() => {
+  const visible = el => {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    const s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+  };
+  const isRed = value => {
+    const bg = (value || '').replace(/\s/g, '');
+    return bg === 'rgb(254,44,85)' || bg === 'rgb(255,44,85)' || bg === 'rgb(255,45,85)';
+  };
+  const pseudoBadge = node => {
+    for (const p of ['::before', '::after']) {
+      const ps = getComputedStyle(node, p);
+      if (!ps || ps.content === 'none' || ps.display === 'none') continue;
+      if (!isRed(ps.backgroundColor)) continue;
+      const w = parseFloat(ps.width), h = parseFloat(ps.height);
+      if (w > 0 && h > 0 && w <= 18 && h <= 18) return true;
+    }
+    return false;
+  };
+  const isBadge = node => {
+    if (!visible(node)) return false;
+    const r = node.getBoundingClientRect();
+    const s = getComputedStyle(node);
+    const cls = typeof node.className === 'string' ? node.className : '';
+    const text = (node.innerText || '').trim();
+    if (isRed(s.backgroundColor) && r.width <= 18 && r.height <= 18) return true;
+    if (pseudoBadge(node)) return true;
+    if (/unread|badge|dot|count/i.test(cls) && r.width <= 40 && r.height <= 24) return true;
+    return /^\d+$/.test(text) && r.width <= 34 && r.height <= 22;
+  };
+  const hasBadge = root => {
+    if (!root) return false;
+    for (const node of root.querySelectorAll('*')) {
+      if (isBadge(node)) return true;
+    }
+    return isBadge(root);
+  };
+  const imEntry = document.querySelector('[data-e2e="im-entry"]');
+  let im = -1;
+  let imDebug = '';
+  if (imEntry) {
+    const parent = imEntry.parentElement;
+    const rp = parent ? parent.getBoundingClientRect() : null;
+    const re = imEntry.getBoundingClientRect();
+    const small = rp && rp.width * rp.height <= Math.max(1, re.width * re.height) * 4;
+    im = hasBadge(small ? parent : imEntry) ? 1 : 0;
+    imDebug = `${imEntry.className || ''}|${(imEntry.outerHTML || '').slice(0, 700)}`;
+  }
+  const header = document.querySelector('#douyin-header') || document.querySelector('header');
+  let notice = -1;
+  const debug = [];
+  if (header) {
+    let found = false;
+    for (const node of header.querySelectorAll('*')) {
+      if (imEntry && (imEntry === node || imEntry.contains(node) || node.contains(imEntry))) continue;
+      if (isBadge(node)) {
+        found = true;
+        if (debug.length < 8) {
+          const r = node.getBoundingClientRect();
+          debug.push({
+            tag: node.tagName,
+            cls: typeof node.className === 'string' ? node.className.slice(0, 60) : '',
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            text: (node.innerText || '').trim().slice(0, 12),
+          });
+        }
+      }
+    }
+    notice = found ? 1 : 0;
+  }
+  return { im, notice, avatar: -1, debug, im_debug: imDebug };
+}
+"""
+
 CONVERSATIONS_JS = r"""
 () => {
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
@@ -461,20 +561,50 @@ CONVERSATIONS_JS = r"""
   const items = [...document.querySelectorAll('[data-e2e="conversation-item"]')];
   const out = [];
   items.forEach((el, index) => {
+    const rowRect = el.getBoundingClientRect();
+    const rightSide = node => {
+      const r = node.getBoundingClientRect();
+      return r.left + r.width / 2 > rowRect.left + rowRect.width * 0.6;
+    };
     const titleEl = el.querySelector('.conversationConversationItemtitle');
     const previewEl = el.querySelector('.ConversationItemHinttextBox');
-    const unreadEl = el.querySelector('.ConversationItemUnReadCount');
+    let unreadEl = el.querySelector('.ConversationItemUnReadCount');
+    if (unreadEl && !rightSide(unreadEl)) unreadEl = null;
+    if (!unreadEl) {
+      unreadEl = [...el.querySelectorAll('[class*="UnRead" i],[class*="unread" i],[class*="Badge" i],[class*="badge" i],[class*="Dot" i],[class*="dot" i]')]
+        .find(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && rightSide(e); }) || null;
+    }
     const timeEl = el.querySelector('[class*="ConversationItem"] [class*="time"], [class*="ConversationItem"] [class*="Time"], [class*="conversation"] [class*="time"]');
     const img = el.querySelector('img');
     const title = clean(titleEl && titleEl.innerText);
     if (!title) return;
     const unreadMatch = clean(unreadEl && unreadEl.innerText).match(/\d+/);
+    let unread = unreadMatch ? Number(unreadMatch[0]) : (unreadEl ? 1 : 0);
+    let unreadDebug = unreadEl ? `node:${unreadEl.className}|${clean(unreadEl.innerText)}|${Math.round(unreadEl.getBoundingClientRect().width)}x${Math.round(unreadEl.getBoundingClientRect().height)}` : '';
+    if (!unread) {
+      // 有的红点没有数字，只渲染成一个小红圆点。
+      for (const node of el.querySelectorAll('*')) {
+        if (node.tagName === 'IMG') continue;
+        const s = getComputedStyle(node);
+        const r = node.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0 || r.width > 14 || r.height > 14) continue;
+        if (parseFloat(s.borderRadius) < 3) continue;
+        if (!rightSide(node)) continue;
+        const bg = s.backgroundColor.replace(/\s/g, '');
+        if (bg === 'rgb(254,44,85)' || bg === 'rgb(255,44,85)' || bg === 'rgb(255,45,85)') {
+          unread = 1;
+          unreadDebug = `red:${node.className}|${bg}|${Math.round(r.width)}x${Math.round(r.height)}|x=${Math.round(r.left)}`;
+          break;
+        }
+      }
+    }
     const r = el.getBoundingClientRect();
     out.push({
       index,
       title,
       preview: clean(previewEl && previewEl.innerText).slice(0, 120),
-      unread: unreadMatch ? Number(unreadMatch[0]) : 0,
+      unread,
+      unread_debug: unreadDebug,
       is_group: !!el.querySelector('.commonConversationIconnoDrag') || title.includes('群'),
       visible: r.width > 0 && r.height > 0,
       avatar: (img && img.src) || '',
@@ -540,16 +670,23 @@ CHAT_TRANSCRIPT_JS = r"""
     const links = [...el.querySelectorAll('a[href]')].map(a => a.href).filter(Boolean).slice(0, 4);
     const avatarImg = [...outer.querySelectorAll('img')].find(img => !el.contains(img) && img.src && !isAvatarImg(img));
     const senderAvatar = [...outer.querySelectorAll('img')].find(img => !el.contains(img) && img.src);
+    const sideAvatar = [...outer.querySelectorAll('img')].find(img => !el.contains(img));
+    const avatarRect = sideAvatar ? sideAvatar.getBoundingClientRect() : null;
     const hasPlay = !!el.querySelector('[class*="play" i], [class*="Play"], [aria-label*="播放"], svg[class*="play" i]');
     const hasVideo = videos.length > 0 || hasPlay || !!el.querySelector('.MessageItemShareAwemecontainer') || [...el.querySelectorAll('[class*="video" i]')].length > 0;
     const videoLink = links.find(u => /\/video\/|\/note\//.test(u)) || '';
+    const mineByAvatar = avatarRect && avatarRect.width > 0 && contentRect.width > 0
+      ? (avatarRect.left + avatarRect.width / 2) > (contentRect.left + contentRect.width / 2)
+      : null;
     return {
       index,
       top: Math.round(contentRect.top),
       text: clean(el.innerText),
       time: clean(timeEl && timeEl.innerText),
       avatar: (senderAvatar && senderAvatar.src) || (avatarImg && avatarImg.src) || '',
-      mine: contentRect.width > 0 && (contentRect.left + contentRect.width / 2) > (listRect.left + listRect.width / 2),
+      mine: mineByAvatar !== null
+        ? mineByAvatar
+        : contentRect.width > 0 && (contentRect.left + contentRect.width / 2) > (listRect.left + listRect.width / 2),
       images,
       videos,
       links,
@@ -656,6 +793,8 @@ class BrowserManager:
         self._pw: Playwright | None = None
         self.context: BrowserContext | None = None
         self.page: Page | None = None
+        self.activity_page: Page | None = None
+        self.activity_at = 0.0
         self.last_error = ""
         self._chrome_pids: set[int] = set()
         self._watch_task: asyncio.Task | None = None
@@ -815,11 +954,14 @@ class BrowserManager:
             self.page = await self.new_page()
         return self.page
 
-    async def new_page(self) -> Page:
+    async def new_page(self, track: bool = True) -> Page:
         if not self.context:
             raise BrowserError("浏览器上下文不可用")
         page = await self.context.new_page()
         page.set_default_timeout(15000)
+        if track:
+            self.activity_page = page
+            self.activity_at = time.monotonic()
         if self.settings.silent_browser and not self._stay_visible:
             if not self._chrome_pids:
                 await self._window_mode("hide")
@@ -1083,6 +1225,22 @@ class BrowserManager:
         except Exception:
             pass
         return await is_open()
+
+    async def nav_badges(self, page: Page | None = None) -> dict[str, int]:
+        target = page or self.page
+        if target is None or target.is_closed():
+            return {"im": -1, "notice": -1, "avatar": -1}
+        try:
+            data = await target.evaluate(NAV_BADGES_JS)
+        except Exception:
+            return {"im": -1, "notice": -1, "avatar": -1}
+        out = {"im": -1, "notice": -1, "avatar": -1}
+        for key in out:
+            try:
+                out[key] = int((data or {}).get(key, -1))
+            except Exception:
+                out[key] = -1
+        return out
 
     async def list_conversations(self, page: Page) -> list[dict[str, Any]]:
         if not await self.open_inbox(page):
@@ -1565,7 +1723,9 @@ class BrowserManager:
             "detail": "私信已发送" if verified else "已点击私信发送，但未读到确认",
         }
 
-    async def share_current_video(self, page: Page, recipient: str) -> dict[str, Any]:
+    async def share_current_video(
+        self, page: Page, recipient: str, expected_id: str = ""
+    ) -> dict[str, Any]:
         """Use the video's native share panel to send it to an existing contact."""
         panel_count_js = """() => [...document.querySelectorAll('input[placeholder="搜索"]')].filter(e => {
             const r = e.getBoundingClientRect();
@@ -1620,14 +1780,54 @@ class BrowserManager:
         for _ in range(2):
             clicked = await page.evaluate(
                 """() => {
-                    const els = [...document.querySelectorAll('[data-e2e="video-player-share"]')]
-                        .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-                    const el = els[els.length - 1];
-                    if (!el) return false;
+                    const visible = el => {
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+                    };
+                    const inView = el => {
+                        const r = el.getBoundingClientRect();
+                        return r.right > 0 && r.left < innerWidth && r.bottom > 0 && r.top < innerHeight;
+                    };
+                    let els = [...document.querySelectorAll('[data-e2e="video-player-share"]')]
+                        .filter(e => visible(e) && inView(e));
+                    // 推荐流会预渲染相邻视频，必须锁定“当前激活视频”里的分享按钮。
+                    const active = document.querySelector('[data-e2e="feed-active-video"]');
+                    if (active) {
+                        const inside = els.filter(e => active.contains(e));
+                        if (inside.length) els = inside;
+                    }
+                    els.sort((a, b) => {
+                        const ra = a.getBoundingClientRect();
+                        const rb = b.getBoundingClientRect();
+                        return Math.abs(ra.top + ra.height / 2 - innerHeight / 2)
+                            - Math.abs(rb.top + rb.height / 2 - innerHeight / 2);
+                    });
+                    const el = els[0];
+                    if (!el) return null;
+                    let vid = '';
+                    let node = el;
+                    for (let i = 0; i < 12 && node; i++, node = node.parentElement) {
+                        const holder = node.matches && node.matches('[data-e2e="feed-active-video"][data-e2e-vid]')
+                            ? node
+                            : (node.querySelector ? node.querySelector('[data-e2e="feed-active-video"][data-e2e-vid]') : null);
+                        if (holder) { vid = holder.getAttribute('data-e2e-vid') || ''; break; }
+                    }
+                    if (!vid) {
+                        const info = document.querySelector('[data-e2e="video-info"][data-e2e-aweme-id]');
+                        vid = info ? (info.getAttribute('data-e2e-aweme-id') || '') : '';
+                    }
                     el.click();
-                    return true;
+                    return { clicked: true, vid };
                 }"""
             )
+            if isinstance(clicked, dict):
+                clicked_vid = str(clicked.get("vid") or "")
+                clicked = bool(clicked.get("clicked"))
+                if expected_id and clicked_vid and clicked_vid != expected_id:
+                    raise ActionError(
+                        f"分享按钮属于视频 {clicked_vid}，与介绍的 {expected_id} 不一致，已取消分享"
+                    )
             if not clicked:
                 break
             for _ in range(24):
@@ -1720,7 +1920,7 @@ class BrowserManager:
 
     async def _open_fans_modal(self, page: Page) -> bool:
         await page.goto("https://www.douyin.com/user/self", wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(3500)
+        await page.wait_for_timeout(2000)
         try:
             hits = await page.evaluate(RISK_JS)
         except Exception:
@@ -1792,6 +1992,50 @@ class BrowserManager:
             except Exception:
                 pass
 
+    async def _follow_via_profile(self, page: Page, name: str, profile_url: str) -> dict[str, Any]:
+        """有主页链接时直接去对方主页点关注/回关，比打开粉丝弹窗快很多。"""
+        await page.goto(profile_url, wait_until="domcontentloaded", timeout=45000)
+        state: dict[str, Any] = {}
+        for _ in range(10):
+            state = dict(await page.evaluate(UNFOLLOW_STATE_JS) or {})
+            if state.get("hits"):
+                break
+            await page.wait_for_timeout(300)
+        try:
+            hits = await page.evaluate(RISK_JS)
+        except Exception:
+            hits = []
+        if hits:
+            raise RiskControl("页面出现风控/验证提示：" + "、".join(str(x) for x in hits))
+        if state.get("following"):
+            return {"status": "already", "detail": "已经关注或互关，无需重复操作", "name": name}
+        if not await page.evaluate(FOLLOW_BUTTON_JS):
+            return {"status": "failed", "detail": "主页上没有找到关注/回关按钮", "name": name}
+        btn = page.locator('[data-dy-agent-follow-profile="1"]').first
+        try:
+            await btn.click(timeout=5000)
+        except Exception as exc:
+            return {"status": "failed", "detail": f"关注按钮点击失败：{str(exc)[:160]}", "name": name}
+        following = False
+        for _ in range(8):
+            await page.wait_for_timeout(250)
+            state = dict(await page.evaluate(UNFOLLOW_STATE_JS) or {})
+            if state.get("following"):
+                following = True
+                break
+        try:
+            hits = await page.evaluate(RISK_JS)
+        except Exception:
+            hits = []
+        if hits:
+            return {"status": "uncertain", "detail": "回关后页面出现验证提示，请手动确认结果", "name": name}
+        return {
+            "status": "sent" if following else "uncertain",
+            "detail": "已回关" if following else "已点击回关，但未读到状态变化",
+            "name": name,
+            "profile_url": profile_url,
+        }
+
     async def follow_fan(self, name: str, profile_url: str = "") -> dict[str, Any]:
         name = (name or "").strip()
         profile_url = (profile_url or "").strip()
@@ -1805,6 +2049,8 @@ class BrowserManager:
             raise LoginRequired("浏览器还没有登录抖音")
         page = await self.new_page()
         try:
+            if profile_url:
+                return await self._follow_via_profile(page, name, profile_url)
             if not await self._open_fans_modal(page):
                 raise ActionError("没有打开粉丝列表，可能页面改版了")
             found = await page.evaluate(
@@ -1834,8 +2080,8 @@ class BrowserManager:
                     "name": found.get("name") or name,
                 }
             state = ""
-            for _ in range(12):
-                await page.wait_for_timeout(300)
+            for _ in range(8):
+                await page.wait_for_timeout(250)
                 try:
                     state = str(
                         await page.evaluate(
@@ -1890,7 +2136,7 @@ class BrowserManager:
         page = await self.new_page()
         try:
             await page.goto(profile_url, wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(2600)
+            await page.wait_for_timeout(1200)
             try:
                 hits = await page.evaluate(RISK_JS)
             except Exception:
@@ -1903,8 +2149,8 @@ class BrowserManager:
                 body = ""
             if name and name not in body:
                 # 昵称在部分主页模板里渲染较慢，不能只凭一次 innerText 判断走错页面。
-                for _ in range(5):
-                    await page.wait_for_timeout(400)
+                for _ in range(3):
+                    await page.wait_for_timeout(300)
                     try:
                         body = await page.evaluate("() => document.body ? document.body.innerText : ''")
                     except Exception:
@@ -1933,7 +2179,7 @@ class BrowserManager:
                     "name": name,
                     "profile_url": profile_url,
                 }
-            await page.wait_for_timeout(700)
+            await page.wait_for_timeout(400)
             clicked_menu = False
             for label in ("取消关注", "不再关注", "取关"):
                 try:
@@ -1947,7 +2193,7 @@ class BrowserManager:
                     continue
                 if clicked_menu:
                     break
-            await page.wait_for_timeout(600)
+            await page.wait_for_timeout(350)
             confirmed = await page.evaluate(
                 r"""() => {
                     const clean = s => (s || '').replace(/\s+/g, ' ').trim();
@@ -1973,10 +2219,10 @@ class BrowserManager:
                 try:
                     confirm_btn = page.locator('[data-dy-agent-confirm-unfollow="1"]').first
                     await confirm_btn.click(timeout=4000)
-                    await page.wait_for_timeout(800)
+                    await page.wait_for_timeout(450)
                 except Exception:
                     pass
-            await page.wait_for_timeout(700)
+            await page.wait_for_timeout(400)
             state = await page.evaluate(UNFOLLOW_STATE_JS)
             state = dict(state or {})
             if not state.get("following") and (state.get("followable") or not state.get("hits")):

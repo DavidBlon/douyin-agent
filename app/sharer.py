@@ -502,8 +502,11 @@ class AutoSharer:
         self._stop = asyncio.Event()
         self.busy = False
         self.last_check = ""
+        self.last_attempt = ""
         self.last_error = ""
         self.last_result: dict[str, Any] = {}
+        self.pending_slot = ""
+        self._pending_notified = ""
 
     @property
     def running(self) -> bool:
@@ -512,14 +515,16 @@ class AutoSharer:
     def status(self) -> dict[str, Any]:
         settings = db.load_settings()
         return {
-            "enabled": settings.auto_share,
+            "enabled": bool(settings.auto_share),
             "running": self.running,
             "busy": self.busy,
             "target": settings.share_target,
             "times": [settings.share_time_1, settings.share_time_2],
             "last_check": self.last_check,
+            "last_attempt": self.last_attempt,
             "last_error": self.last_error,
             "last_result": self.last_result,
+            "pending_slot": self.pending_slot,
             "today": db.count_actions_today("share"),
         }
 
@@ -534,8 +539,25 @@ class AutoSharer:
         if self.running:
             return
         self._stop = asyncio.Event()
-        self.task = asyncio.create_task(self._loop())
         settings = db.load_settings()
+        for slot in (settings.share_time_1, settings.share_time_2):
+            try:
+                hour, minute = [int(x) for x in slot.split(":", 1)]
+                target = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+            except Exception:
+                continue
+            lag = (datetime.now() - target).total_seconds()
+            if 0 <= lag <= 7200 and not db.share_ran(db.today_key(), slot):
+                self.pending_slot = slot
+                self.runner.share_pending = True
+                await bus.emit(
+                    "share_status",
+                    f"定时分享 {slot} 还没执行，启动后补发",
+                    {"slot": slot},
+                    level="warn",
+                )
+                break
+        self.task = asyncio.create_task(self._loop())
         await bus.emit("share_status", "定时分享已启动", {"times": [settings.share_time_1, settings.share_time_2]})
 
     async def stop(self) -> None:
@@ -552,6 +574,7 @@ class AutoSharer:
 
     async def _loop(self) -> None:
         while not self._stop.is_set():
+            self.last_attempt = db.now_iso()
             try:
                 await self.check_once()
             except asyncio.CancelledError:
@@ -572,6 +595,19 @@ class AutoSharer:
             except asyncio.TimeoutError:
                 pass
 
+    async def _hold_pending(self, slot: str, reason: str) -> None:
+        self.pending_slot = slot
+        self.runner.share_pending = True
+        if self._pending_notified == slot:
+            return
+        self._pending_notified = slot
+        await bus.emit(
+            "share_status",
+            f"定时分享到点（{slot}），{reason}，已排队，空闲后自动补发",
+            {"slot": slot, "reason": reason},
+            level="warn",
+        )
+
     @staticmethod
     def _due_slot(settings: AgentSettings) -> str:
         now = datetime.now()
@@ -588,20 +624,37 @@ class AutoSharer:
 
     async def check_once(self, force: bool = False) -> dict[str, Any]:
         settings = db.load_settings()
-        if not settings.auto_share and not force:
+        if not force and not settings.auto_share:
+            self.pending_slot = ""
+            self.runner.share_pending = False
             return {"ok": True, "skipped": "disabled"}
         target = settings.share_target.strip()
         if not target:
             raise ActionError("还没有设置分享接收账号")
         slot = "manual" if force else self._due_slot(settings)
+        if not force and not slot and self.pending_slot:
+            if db.share_ran(db.today_key(), self.pending_slot):
+                self.pending_slot = ""
+                self._pending_notified = ""
+                self.runner.share_pending = False
+                return {"ok": True, "skipped": "already_ran"}
+            slot = self.pending_slot
         if not slot:
             return {"ok": True, "skipped": "not_due"}
         if not force and db.share_ran(db.today_key(), slot):
+            self.pending_slot = ""
+            self._pending_notified = ""
             return {"ok": True, "skipped": "already_ran"}
         if self.busy:
             return {"ok": True, "skipped": "busy"}
         if self.runner.running or self.runner.exclusive.locked():
+            if not force:
+                await self._hold_pending(slot, "浏览器正被自动回复/刷流占用")
             return {"ok": True, "skipped": "run_in_progress"}
+        if getattr(self.runner, "run_pending", False):
+            if not force:
+                await self._hold_pending(slot, "有一轮正在排队")
+            return {"ok": True, "skipped": "run_pending"}
         if not load_api_key():
             raise LLMError("还没有配置 API Key，定时分享无法运行")
 
@@ -630,6 +683,9 @@ class AutoSharer:
                 self.last_result = result
                 if not force:
                     db.mark_share_run(db.today_key(), slot)
+                self.pending_slot = ""
+                self._pending_notified = ""
+                self.runner.share_pending = False
                 await bus.emit(
                     "share_cycle",
                     f"定时分享检查完成：分享 {result.get('shared', 0)} 条",
@@ -734,6 +790,7 @@ class AutoSharer:
                     {"aweme_id": aid, "target": target, "intro": message, "dry_run": True, "cover_used": bool(cover_data)},
                 )
             else:
+                await self._pause_current(page)
                 sent_intro = await self._send_intro(page, target, message)
                 if not sent_intro:
                     await bus.emit(
@@ -744,8 +801,21 @@ class AutoSharer:
                     )
                     await self._scroll(page)
                     continue
+                if not await self._ensure_current_video(page, aid):
+                    await self._send_intro(
+                        page,
+                        target,
+                        f"视频卡片没发出去，先给你链接：https://www.douyin.com/video/{aid}",
+                    )
+                    await bus.emit(
+                        "share",
+                        f"介绍已发，但视频已切走（{aid}），已改发视频链接",
+                        {"aweme_id": aid, "target": target},
+                        level="warn",
+                    )
+                    continue
                 try:
-                    result = await self.browser.share_current_video(page, target)
+                    result = await self.browser.share_current_video(page, target, aid)
                 except Exception as exc:
                     result = {"status": "failed", "detail": str(exc)[:300]}
                 status = str(result.get("status") or "uncertain")
@@ -784,24 +854,101 @@ class AutoSharer:
                     },
                     level="info" if status == "sent" else "warn",
                 )
+            if "/video/" in page.url:
+                try:
+                    await page.goto(FEED_URL, wait_until="domcontentloaded", timeout=45000)
+                    await page.wait_for_timeout(2200)
+                except Exception:
+                    pass
             if accepted >= settings.share_max_per_run:
                 break
             await self._scroll(page)
         return {"shared": shared, "scanned": scanned, "target": target}
 
-    async def _send_intro(self, page: Page, target: str, message: str) -> bool:
-        conversations = await self.browser.list_conversations(page)
-        conv = next(
-            (
-                c
-                for c in conversations
-                if not c.get("is_group") and str(c.get("title") or "").strip() == target
-            ),
-            None,
-        )
-        if not conv:
+    async def _pause_current(self, page: Page) -> None:
+        try:
+            await page.evaluate(
+                "() => document.querySelectorAll('video').forEach(v => { v.muted = true; v.pause(); })"
+            )
+        except Exception:
+            pass
+
+    async def _current_id(self, page: Page) -> str:
+        try:
+            return str(await page.evaluate(CURRENT_ID_JS) or "")
+        except Exception:
+            return ""
+
+    async def _ensure_current_video(self, page: Page, aweme_id: str) -> bool:
+        if await self._current_id(page) == aweme_id:
+            return True
+        try:
+            await page.goto(
+                f"https://www.douyin.com/video/{aweme_id}",
+                wait_until="domcontentloaded",
+                timeout=45000,
+            )
+            await page.wait_for_timeout(2200)
+            await self._pause_current(page)
+        except Exception:
             return False
-        if not await self.browser.open_conversation(page, int(conv.get("index") or 0)):
+        if await self._current_id(page) == aweme_id:
+            return True
+        return aweme_id in page.url
+
+    async def _send_intro(self, page: Page, target: str, message: str) -> bool:
+        conv = None
+        conversations: list[dict[str, Any]] = []
+        for attempt in range(4):
+            conversations = await self.browser.list_conversations(page)
+            conv = next(
+                (
+                    c
+                    for c in conversations
+                    if not c.get("is_group") and str(c.get("title") or "").strip() == target
+                ),
+                None,
+            )
+            if conv:
+                break
+            await page.wait_for_timeout(900)
+        if not conv:
+            try:
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(300)
+                await self.browser.open_inbox(page)
+                await page.wait_for_timeout(1200)
+                conversations = await self.browser.list_conversations(page)
+                conv = next(
+                    (
+                        c
+                        for c in conversations
+                        if not c.get("is_group") and str(c.get("title") or "").strip() == target
+                    ),
+                    None,
+                )
+            except Exception:
+                pass
+        if not conv:
+            titles = [str(c.get("title") or "") for c in conversations[:8]]
+            await bus.emit(
+                "share",
+                f"私信列表里没找到「{target}」（读到 {len(conversations)} 个会话：{'、'.join(titles) or '空'}）",
+                {"target": target, "conversations": titles},
+                level="warn",
+            )
+            return False
+        opened = False
+        opener = getattr(self.browser, "open_conversation_by_title", None)
+        if opener is not None:
+            try:
+                opened = bool(await opener(page, target))
+            except Exception:
+                opened = False
+        if not opened:
+            opened = await self.browser.open_conversation(page, int(conv.get("index") or 0))
+        if not opened:
+            await bus.emit("share", f"找到「{target}」的会话，但打开失败", {"target": target}, level="warn")
             return False
         try:
             await self.browser.send_chat_message(page, message)

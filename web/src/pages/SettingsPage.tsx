@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Bot,
+  CalendarDays,
   Camera,
   Check,
   Chrome,
@@ -527,6 +528,68 @@ export function SettingsPage({
                 placeholder="例如：AI 工具、独立开发、商业案例、城市生活、历史冷知识"
               />
             </label>
+          </section>
+
+          <section className="settings-card">
+            <header className="settings-card-head">
+              <div className="settings-title"><CalendarDays size={17} /> 内容与发布</div>
+              <span className="mini-chip chip-muted">自动排期</span>
+            </header>
+            <div className="switch-list">
+              <SwitchRow
+                title="自动生成内容"
+                desc="总开关开启后，每天自动选题、写脚本、做封面并排期。"
+                checked={form.auto_content}
+                onChange={(v) => set("auto_content", v)}
+              />
+              <SwitchRow
+                title="自动成片"
+                desc="用本地 ffmpeg 把封面、背景和字幕稿做成无声竖屏视频。"
+                checked={form.auto_video}
+                onChange={(v) => set("auto_video", v)}
+              />
+              <SwitchRow
+                title="到点自动发布"
+                desc="总开关开启且合规通过后，到点自动上传发布；关闭时只生成和排队。"
+                checked={form.auto_publish}
+                onChange={(v) => set("auto_publish", v)}
+              />
+              <SwitchRow
+                title="CRM 自动打标签"
+                desc="根据私信内容自动更新标签、阶段和意向分，可随时手动改。"
+                checked={form.crm_auto_tag}
+                onChange={(v) => set("crm_auto_tag", v)}
+              />
+            </div>
+            <label className="field">
+              <span>内容栏目</span>
+              <input
+                className="input"
+                value={form.content_pillars}
+                onChange={(e) => set("content_pillars", e.target.value)}
+                placeholder="经验分享、工具测评、生活记录"
+              />
+            </label>
+            <div className="form-grid two">
+              <label className="field">
+                <span>每天生成时间</span>
+                <input
+                  className="input"
+                  type="time"
+                  value={form.content_generate_time}
+                  onChange={(e) => set("content_generate_time", e.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>每天发布时间</span>
+                <input
+                  className="input"
+                  type="time"
+                  value={form.publish_time}
+                  onChange={(e) => set("publish_time", e.target.value)}
+                />
+              </label>
+            </div>
           </section>
         </div>
       </div>

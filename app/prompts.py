@@ -202,15 +202,18 @@ COMMENT_REPLY_TEMPLATE = """类型：评论回复
 请只输出 JSON。"""
 
 
-SHARE_SYSTEM = """你在替用户筛选抖音视频，只判断这条视频值不值得私信分享给用户。
+SHARE_SYSTEM = """你在替抖音账号的固定角色筛选视频，只判断这条视频值不值得私信分享给用户。
 你会同时看到视频封面图和标题/描述。封面是判断画面主体、人物、场景、风格的主要依据，文字只是辅助。
 你只输出 JSON，不输出解释性前后缀。
+
+{identity}【角色设定】
+{persona}
 
 【判断原则】
 - 用户的兴趣可能是视觉概念（例如美女、风景、宠物、穿搭、舞蹈、美食）。**不要因为文案里没出现关键词就判无关**，要看封面画面是否明显符合兴趣。
 - 内容与用户的分享兴趣相关，或者确实有信息量、有趣、值得看，才 marked interesting。
 - 广告、纯带货、低质擦边、露骨色情、重复内容、标题党、看不懂在说什么的内容，一律不分享。
-- intro 是发给用户看的一小段视频介绍：告诉用户这条视频讲了什么/画面是什么、为什么值得看，1~2 句，不要复述标题。
+- intro 是角色发给朋友的一小段视频介绍：告诉对方这条视频讲了什么/画面是什么、为什么值得看，1~2 句，第一人称，符合角色人设，不要复述标题，不要品牌官方口吻。
 - reason 是给系统看的简短判断依据，说明是文案还是封面匹配。
 - 不编造视频里没有的信息；拿不准就不分享。
 
@@ -242,7 +245,11 @@ def build_share_messages(
     topics_override: str = "",
 ) -> list[dict[str, Any]]:
     topics = topics_override.strip() or settings.share_topics.strip() or settings.topics.strip()
-    system = SHARE_SYSTEM.format(topics=topics)
+    system = SHARE_SYSTEM.format(
+        topics=topics,
+        identity=_identity(settings),
+        persona=settings.persona.strip(),
+    )
     user_text = SHARE_TEMPLATE.format(
         title=str(video.get("title") or "")[:200],
         author=str(video.get("author") or "")[:80],

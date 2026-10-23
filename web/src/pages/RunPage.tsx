@@ -20,6 +20,7 @@ import {
   UserMinus,
   UserPlus,
   Users,
+  Video as VideoIcon,
   WandSparkles,
 } from "lucide-react";
 import { api } from "../api";
@@ -37,6 +38,7 @@ interface RunPageProps {
   onStop: () => void;
   onOpenBrowser: () => void;
   onToggleDryRun: (next: boolean) => void;
+  onToggleAutoOperate: (next: boolean) => void;
   onCheckReplier: () => void;
   onGoSettings: () => void;
 }
@@ -79,16 +81,103 @@ function Cover({ video }: { video: Video }) {
   );
 }
 
+function LiveFeed() {
+  const [state, setState] = useState<"connecting" | "live" | "idle" | "closed">("connecting");
+  const [src, setSrc] = useState("");
+  const [hint, setHint] = useState("");
+
+  useEffect(() => {
+    let closed = false;
+    let ws: WebSocket | null = null;
+    let lastUrl = "";
+    let retry = 0;
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const connect = () => {
+      if (closed) return;
+      ws = new WebSocket(`${proto}//${window.location.host}/api/live/ws`);
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => setState("connecting");
+      ws.onmessage = (event) => {
+        if (closed) return;
+        if (typeof event.data === "string") {
+          try {
+            const info = JSON.parse(event.data);
+            setState(info.streaming ? "live" : "idle");
+            setHint(info.streaming ? "" : "浏览器还没有打开抖音页面");
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+        const blob = new Blob([event.data], { type: "image/jpeg" });
+        const url = URL.createObjectURL(blob);
+        if (lastUrl) URL.revokeObjectURL(lastUrl);
+        lastUrl = url;
+        setSrc(url);
+        setState("live");
+        retry = 0;
+      };
+      ws.onclose = () => {
+        if (closed) return;
+        setState("closed");
+        retry += 1;
+        window.setTimeout(connect, Math.min(5000, 800 * retry));
+      };
+    };
+    connect();
+    return () => {
+      closed = true;
+      if (lastUrl) URL.revokeObjectURL(lastUrl);
+      ws?.close();
+    };
+  }, []);
+
+  return (
+    <div className="live-feed">
+      {src ? <img src={src} alt="AI 视角实时画面" /> : null}
+      {!src || state !== "live" ? (
+        <div className="live-placeholder">
+          <ScanLine size={22} />
+          <span>{state === "closed" ? "直播连接已断开" : hint || "等待第一帧画面…"}</span>
+        </div>
+      ) : null}
+      <span className={`live-tag ${state === "live" ? "on" : ""}`}>
+        <i /> {state === "live" ? "LIVE" : state === "closed" ? "OFF" : "…"}
+      </span>
+    </div>
+  );
+}
+
 function VideoPanel({ video }: { video: Video | null }) {
+  const [live, setLive] = useState(true);
+  const head = (
+    <div className="panel-head">
+      <div>
+        <span className="eyebrow">CURRENT</span>
+        <h2>当前视频</h2>
+      </div>
+      <button
+        className={`btn btn-ghost ${live ? "on" : ""}`}
+        onClick={() => setLive((v) => !v)}
+        type="button"
+        title="把专用浏览器当前页的画面实时投到控制台"
+      >
+        <VideoIcon size={14} /> {live ? "退出 AI 视角" : "AI 视角"}
+      </button>
+    </div>
+  );
+  if (live) {
+    return (
+      <section className="panel video-panel live-mode">
+        {head}
+        <LiveFeed />
+      </section>
+    );
+  }
   if (!video) {
     return (
       <section className="panel video-panel">
-        <div className="panel-head">
-          <div>
-            <span className="eyebrow">CURRENT</span>
-            <h2>当前视频</h2>
-          </div>
-        </div>
+        {head}
         <EmptyState icon={ScanLine} title="还没有读到视频" />
       </section>
     );
@@ -102,11 +191,16 @@ function VideoPanel({ video }: { video: Video | null }) {
           <span className="eyebrow">CURRENT</span>
           <h2>当前视频</h2>
         </div>
-        {link ? (
-          <a className="text-link" href={link} target="_blank" rel="noreferrer">
-            打开抖音 <ExternalLink size={13} />
-          </a>
-        ) : null}
+        <div className="panel-head-actions">
+          {link ? (
+            <a className="text-link" href={link} target="_blank" rel="noreferrer">
+              打开抖音 <ExternalLink size={13} />
+            </a>
+          ) : null}
+          <button className="btn btn-ghost" onClick={() => setLive(true)} type="button">
+            <VideoIcon size={14} /> AI 视角
+          </button>
+        </div>
       </div>
       <Cover video={video} />
       <div className="video-copy">
@@ -334,6 +428,10 @@ function ActivityPanel({ events, running }: { events: AgentEvent[]; running: boo
   );
 }
 
+let fansCache: { at: number; data: FansResponse } | null = null;
+let fansInflight: Promise<FansResponse> | null = null;
+const FANS_CACHE_MS = 60_000;
+
 function FansPanel({
   loggedIn,
   onOpenBrowser,
@@ -341,7 +439,7 @@ function FansPanel({
   loggedIn: boolean;
   onOpenBrowser: () => void;
 }) {
-  const [data, setData] = useState<FansResponse | null>(null);
+  const [data, setData] = useState<FansResponse | null>(() => fansCache?.data ?? null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [pending, setPending] = useState("");
@@ -354,22 +452,49 @@ function FansPanel({
     return () => window.clearTimeout(timer);
   }, [unfollowArm]);
 
-  const load = useCallback(async () => {
-    if (!loggedIn) return;
-    setLoading(true);
-    setError("");
-    try {
-      setData(await api.fans());
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }, [loggedIn]);
+  const load = useCallback(
+    async (force = false) => {
+      if (!loggedIn) return;
+      if (!force && fansCache && Date.now() - fansCache.at < FANS_CACHE_MS) {
+        setData(fansCache.data);
+        return;
+      }
+      if (force) fansInflight = null;
+      setLoading(true);
+      setError("");
+      try {
+        if (!fansInflight) fansInflight = api.fans();
+        const next = await fansInflight;
+        fansInflight = null;
+        fansCache = { at: Date.now(), data: next };
+        setData(next);
+      } catch (e) {
+        fansInflight = null;
+        setError((e as Error).message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [loggedIn],
+  );
 
   useEffect(() => {
     if (loggedIn) void load();
   }, [loggedIn, load]);
+
+  const patchFan = (key: string, patch: Partial<Fan>) => {
+    const apply = (prev: FansResponse | null): FansResponse | null =>
+      prev
+        ? {
+            ...prev,
+            items: prev.items.map((item) =>
+              (item.profile_url || item.name) === key ? { ...item, ...patch } : item
+            ),
+          }
+        : prev;
+    setData(apply);
+    if (fansCache) fansCache = { ...fansCache, data: apply(fansCache.data) as FansResponse };
+  };
 
   const follow = async (fan: Fan) => {
     const key = fan.profile_url || fan.name;
@@ -379,18 +504,7 @@ function FansPanel({
     try {
       const res = await api.followFan(fan.name, fan.profile_url);
       if (["sent", "already", "uncertain"].includes(res.status)) {
-        setData((prev) =>
-          prev
-            ? {
-                ...prev,
-                items: prev.items.map((item) =>
-                  (item.profile_url || item.name) === key
-                    ? { ...item, following: true, status: "相互关注" }
-                    : item
-                ),
-              }
-            : prev
-        );
+        patchFan(key, { following: true, status: "相互关注" });
       } else {
         setNotice(res.detail || `回关 ${fan.name} 失败`);
       }
@@ -410,18 +524,7 @@ function FansPanel({
     try {
       const res = await api.unfollowFan(fan.name, fan.profile_url);
       if (["sent", "uncertain", "skipped"].includes(res.status)) {
-        setData((prev) =>
-          prev
-            ? {
-                ...prev,
-                items: prev.items.map((item) =>
-                  (item.profile_url || item.name) === key
-                    ? { ...item, following: false, status: "回关" }
-                    : item
-                ),
-              }
-            : prev
-        );
+        patchFan(key, { following: false, status: "回关" });
       } else {
         setNotice(res.detail || `取关 ${fan.name} 失败`);
       }
@@ -445,7 +548,7 @@ function FansPanel({
           {loggedIn ? <span className="mini-chip chip-muted">{total} 位粉丝</span> : null}
           <button
             className="btn btn-ghost fans-refresh"
-            onClick={() => void load()}
+            onClick={() => void load(true)}
             disabled={!loggedIn || loading}
             type="button"
           >
@@ -465,7 +568,7 @@ function FansPanel({
       {loggedIn && error ? (
         <div className="fans-empty">
           <p className="fans-error">{error}</p>
-          <button className="btn btn-ghost" onClick={() => void load()} type="button">重试</button>
+          <button className="btn btn-ghost" onClick={() => void load(true)} type="button">重试</button>
         </div>
       ) : null}
 
@@ -567,6 +670,7 @@ export function RunPage({
   onStop,
   onOpenBrowser,
   onToggleDryRun,
+  onToggleAutoOperate,
   onCheckReplier,
   onGoSettings,
 }: RunPageProps) {
@@ -640,9 +744,23 @@ export function RunPage({
               <Chrome size={15} /> {logged ? "打开浏览器" : "登录浏览器"}
             </button>
           </div>
-          <div className="dry-row">
-            <strong>预演模式</strong>
-            <Toggle checked={dry} onChange={onToggleDryRun} disabled={busy === "settings"} label="预演模式" />
+          <div className="switch-pair">
+            <div className="dry-row">
+              <strong>预演模式</strong>
+              <Toggle checked={dry} onChange={onToggleDryRun} disabled={busy === "settings"} label="预演模式" />
+            </div>
+            <div className={`auto-row ${settings?.auto_operate ? "on" : ""}`}>
+              <div>
+                <strong>全自动运营</strong>
+                <span>{settings?.auto_operate ? "自动选题 · 成片 · 发布 · 刷流互动" : "自动内容与发布已暂停"}</span>
+              </div>
+              <Toggle
+                checked={Boolean(settings?.auto_operate)}
+                onChange={onToggleAutoOperate}
+                disabled={busy === "settings"}
+                label="全自动运营"
+              />
+            </div>
           </div>
         </div>
       </section>

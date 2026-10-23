@@ -88,6 +88,7 @@ export function ChatDock() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const stickRef = useRef(true);
+  const msgSigRef = useRef("");
 
   const unread = summary?.unread_total || 0;
 
@@ -153,6 +154,9 @@ export function ChatDock() {
       try {
         const res = await api.chatMessages(key);
         if (!alive || activeKeyRef.current !== key) return;
+        const sig = res.messages.map((m) => m.id).join("|");
+        if (sig === msgSigRef.current) return;
+        msgSigRef.current = sig;
         setMessages(res.messages);
         setActive(res.conversation);
         setConversations((prev) =>
@@ -180,6 +184,7 @@ export function ChatDock() {
     try {
       const res = await withTimeout(api.chatMessages(conv.key), 45000, "消息加载超时，请重试");
       if (activeKeyRef.current !== conv.key) return;
+      msgSigRef.current = res.messages.map((m) => m.id).join("|");
       setMessages(res.messages);
       setActive(res.conversation);
       setConversations((prev) =>
@@ -197,6 +202,7 @@ export function ChatDock() {
       setView("chat");
       setActive(conv);
       activeKeyRef.current = conv.key;
+      msgSigRef.current = "";
       setMessages([]);
       setChatError("");
       setViewer(null);
@@ -252,8 +258,9 @@ export function ChatDock() {
     setSending(true);
     setChatError("");
     try {
-      const res = await withTimeout(api.chatSend(active.key, text), 30000, "发送超时，请稍后确认消息是否已发出");
+      const res = await withTimeout(api.chatSend(active.key, text), 45000, "发送耗时较长，请稍后在会话里确认是否已发出");
       if (activeKeyRef.current !== active.key) return;
+      msgSigRef.current = res.messages.map((m) => m.id).join("|");
       setMessages(res.messages);
       setActive(res.conversation);
       setConversations((prev) =>
@@ -527,12 +534,13 @@ export function ChatDock() {
                   const otherMedia = msg.media.filter((item) => item.kind !== "video");
                   const caption = video ? msg.text : "";
                   const bubbleText = otherMedia.length && !msg.text ? "" : msg.text;
+                  const selfAvatar = messages.find((m) => !m.incoming && m.avatar)?.avatar || "";
                   return (
                     <div key={msg.id} className={`chat-msg ${msg.incoming ? "in" : "out"}`}>
                       {showTime ? <div className="chat-time">{msg.time}</div> : null}
                       <div className="chat-msg-row">
                         <Avatar
-                          src={msg.avatar || (msg.incoming ? active?.avatar : "")}
+                          src={msg.avatar || (msg.incoming ? active?.avatar : selfAvatar)}
                           name={msg.incoming ? active?.title || "对方" : "我"}
                           size={28}
                         />

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 import traceback
 from typing import Any
 
 from playwright.async_api import Page
 
-from . import chat, db, policy
+from . import chat, crm, db, policy
 from .agent import AgentRunner
 from .browser import ActionError, BrowserManager, LoginRequired, RiskControl
 from .config import AgentSettings, load_api_key
@@ -91,6 +92,9 @@ class AutoReplier:
         self.last_result: dict[str, Any] = {}
         self._last_skip_signature: tuple[tuple[str, str], ...] = ()
         self._worker_pages: list[Page] = []
+        self._wake = asyncio.Event()
+        self._manual_until = 0.0
+        self._quiet_until = 0.0
 
     @property
     def running(self) -> bool:
@@ -99,7 +103,7 @@ class AutoReplier:
     def status(self) -> dict[str, Any]:
         settings = db.load_settings()
         return {
-            "enabled": settings.auto_reply,
+            "enabled": bool(settings.auto_reply),
             "running": self.running,
             "busy": self.busy,
             "last_check": self.last_check,
@@ -160,11 +164,15 @@ class AutoReplier:
                 self.last_error = str(exc)[:300]
                 print("[replier] " + traceback.format_exc(), flush=True)
                 await bus.emit("reply_status", "自动回复检查失败", {"error": str(exc)[:200]}, level="warn")
-            delay = max(20, db.load_settings().reply_interval_sec)
+            delay = max(8, db.load_settings().reply_interval_sec)
+            if time.monotonic() < self._manual_until:
+                delay = 3
+            self._wake.clear()
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=delay)
+                await asyncio.wait_for(self._wake.wait(), timeout=delay)
             except asyncio.TimeoutError:
                 pass
+            self._wake.clear()
 
     async def _new_inbox_page(self) -> Page:
         if not self.browser.context:
@@ -193,15 +201,56 @@ class AutoReplier:
         self._worker_pages.append(page)
         return page
 
-    async def check_once(self) -> dict[str, Any]:
+    def queue_manual(self, detail: str = "") -> dict[str, Any]:
+        self._manual_until = time.monotonic() + 300
+        self._wake.set()
+        return {
+            "ok": True,
+            "queued": True,
+            "detail": detail or "浏览器正被其他任务占用，已排队，空闲后立即检查",
+        }
+
+    async def check_once(self, manual: bool = False) -> dict[str, Any]:
         settings = db.load_settings()
-        if not settings.auto_reply or self.busy:
-            return {"ok": True, "skipped": "disabled_or_busy"}
+        if not settings.auto_reply:
+            self.runner.reply_pending = False
+            return {"ok": True, "skipped": "disabled"}
+        if manual:
+            dm_needed = settings.auto_reply_dms
+            comment_needed = settings.auto_reply_comments
+            self.runner.reply_pending = True
+        else:
+            badges = {"im": -1, "notice": -1, "avatar": -1}
+            reader = getattr(self.browser, "nav_badges", None)
+            if reader is not None:
+                badges = await reader(self.browser.page)
+            dm_needed = settings.auto_reply_dms and (badges.get("im") != 0 or badges.get("notice") == 1)
+            comment_needed = settings.auto_reply_comments and badges.get("notice") != 0
+            self.runner.reply_pending = bool(dm_needed or comment_needed)
+            if not dm_needed and not comment_needed:
+                self._quiet_until = 0.0
+                return {"ok": True, "skipped": "no_badge"}
+            if time.monotonic() < self._quiet_until:
+                self.runner.reply_pending = False
+                return {"ok": True, "skipped": "quiet"}
+        if self.busy:
+            if manual:
+                return self.queue_manual("自动回复正在检查中，本轮结束后立即再查一次")
+            return {"ok": True, "skipped": "busy"}
         if self.runner.running or self.runner.exclusive.locked():
+            if manual:
+                return self.queue_manual("浏览器正在执行推荐流或分享任务，已排队，任务结束后立即检查")
             return {"ok": True, "skipped": "run_in_progress"}
+        if self.runner.run_pending:
+            # 有一轮在排队等浏览器，自动回复让出，避免互相饿死。
+            return {"ok": True, "skipped": "run_pending"}
+        if getattr(self.runner, "share_pending", False):
+            # 定时分享已到点正在排队，自动回复让出浏览器。
+            return {"ok": True, "skipped": "share_pending"}
         if not load_api_key():
             raise LLMError("还没有配置 API Key，自动回复无法运行")
 
+        self._manual_until = 0.0
         self.busy = True
         page: Page | None = None
         try:
@@ -214,14 +263,14 @@ class AutoReplier:
                 self.last_check = db.now_iso()
                 self.last_error = ""
                 notifications: list[dict[str, Any]] = []
-                if settings.auto_reply_dms and settings.dm_reply_scope != "existing":
+                if dm_needed and settings.dm_reply_scope != "existing":
                     notifications = await self.browser.read_notifications(page, "全部消息")
 
                 dm_done = 0
                 comment_done = 0
-                if settings.auto_reply_dms:
+                if dm_needed:
                     dm_done = await self._reply_dms(page, settings, notifications)
-                if settings.auto_reply_comments:
+                if comment_needed:
                     try:
                         await page.keyboard.press("Escape")
                         await page.wait_for_timeout(300)
@@ -230,6 +279,8 @@ class AutoReplier:
                     comment_done = await self._notice_comments(page, settings)
 
                 self.last_result = {"dm": dm_done, "comment": comment_done}
+                if not manual and dm_done == 0 and comment_done == 0:
+                    self._quiet_until = time.monotonic() + 45
                 await bus.emit(
                     "reply_cycle",
                     f"自动回复检查完成：私信 {dm_done} 条，评论 {comment_done} 条",
@@ -238,6 +289,7 @@ class AutoReplier:
                 return {"ok": True, "dm": dm_done, "comment": comment_done}
         finally:
             self.busy = False
+            self.runner.reply_pending = False
             for extra in list(self._worker_pages):
                 if extra is not page and not extra.is_closed():
                     try:
@@ -250,6 +302,10 @@ class AutoReplier:
                     await page.close()
                 except Exception:
                     pass
+
+    def _has_new_message(self, conv: dict[str, Any]) -> bool:
+        # 只认消息行上的红点/未读数，避免把没有红点的会话也点开。
+        return int(conv.get("unread") or 0) > 0
 
     async def _reply_dms(
         self,
@@ -298,6 +354,9 @@ class AutoReplier:
             preview = str(conv.get("preview") or "").strip()
             if not name or not preview or name in seen_titles:
                 continue
+            if name.isdigit() and len(name) >= 8:
+                # 陌生人/系统会话常用一串数字当标题，打开通常失败，跳过避免空转。
+                continue
             seen_titles.add(name)
             if conv.get("is_group") or any(hint in preview for hint in system_hints):
                 continue
@@ -324,10 +383,15 @@ class AutoReplier:
                 level="info",
             )
             return 0
+        candidates = [c for c in candidates if self._has_new_message(c)]
+        if not candidates:
+            return 0
+        for c in candidates:
+            print(f"[reply] unread {c.get('name')!r} debug={c.get('unread_debug')!r}", flush=True)
         candidates.sort(key=lambda c: (0 if int(c.get("unread") or 0) > 0 else 1, int(c.get("index") or 0)))
         await bus.emit(
             "reply",
-            f"检查到 {len(candidates)} 个 1 对 1 会话",
+            f"发现 {len(candidates)} 个有新消息的会话",
             {
                 "conversations": [
                     {"title": c["name"], "unread": c.get("unread", 0)} for c in candidates[:6]
@@ -340,7 +404,7 @@ class AutoReplier:
         skips: list[tuple[str, str]] = []
         active_page = page
         for idx, conv in enumerate(candidates[:4]):
-            if self._stop.is_set():
+            if self._stop.is_set() or self.runner.run_pending or getattr(self.runner, "share_pending", False):
                 break
             name = conv["name"]
             target_key = _conversation_key(conv)
@@ -397,6 +461,21 @@ class AutoReplier:
                 incoming = bool(conv["preview"]) and (
                     conv["preview"] in latest_text or latest_text in conv["preview"]
                 )
+            if not incoming and int(conv.get("unread") or 0) > 0:
+                # 有红点说明对方确实发了新消息；可能是消息列表还没刷新，再读一次。
+                await active_page.wait_for_timeout(1200)
+                retry_messages, _ = await _read_conversation(self.browser, active_page, conv)
+                if retry_messages:
+                    latest = retry_messages[-1]
+                    latest_text = str(latest.get("text") or "").strip() or latest_text
+                    latest_avatar = _base_url(str(latest.get("avatar") or ""))
+                    contact_avatar = _base_url(str(conv.get("avatar") or ""))
+                    if latest_avatar:
+                        incoming = bool(contact_avatar) and latest_avatar == contact_avatar
+                    else:
+                        incoming = bool(conv["preview"]) and (
+                            conv["preview"] in latest_text or latest_text in conv["preview"]
+                        )
             if not incoming:
                 skips.append((name, "最后一条不是对方发的"))
                 continue
@@ -405,6 +484,12 @@ class AutoReplier:
                 continue
 
             transcript = messages[-8:]
+            try:
+                crm.note_incoming(
+                    target_key, name, str(conv.get("avatar") or ""), latest_text
+                )
+            except Exception:
+                pass
             for item in transcript:
                 avatar = _base_url(str(item.get("avatar") or ""))
                 item["outgoing"] = bool(avatar and contact_avatar and avatar != contact_avatar)
@@ -424,9 +509,9 @@ class AutoReplier:
             }
             decision, usage = await decider.reply("dm", context, db.recent_replies(6))
             if not decision.share and db.reply_exists(
-                "reply_dm", target_key, latest_text, max_age_seconds=600
+                "reply_dm", target_key, latest_text, max_age_seconds=60
             ):
-                skips.append((name, "这条消息已经回复过"))
+                skips.append((name, "同一句话刚回复过"))
                 continue
             if decision.share:
                 try:
@@ -450,6 +535,10 @@ class AutoReplier:
                             status="sent",
                         )
                     handled += 1
+                    try:
+                        crm.note_reply(target_key, "[视频分享]")
+                    except Exception:
+                        pass
                     await bus.emit(
                         "reply",
                         f"点播分享 {name}：{share_status}",
@@ -491,6 +580,10 @@ class AutoReplier:
                         status=str(sent.get("status") or "uncertain"),
                     )
                     handled += 1
+                    try:
+                        crm.note_reply(target_key, fallback)
+                    except Exception:
+                        pass
                 await self._record(
                     settings,
                     "reply_dm",
@@ -614,6 +707,10 @@ class AutoReplier:
                     status=status,
                 )
                 handled += 1
+                try:
+                    crm.note_reply(target_key, reply)
+                except Exception:
+                    pass
             await self._record(
                 settings,
                 "reply_dm",

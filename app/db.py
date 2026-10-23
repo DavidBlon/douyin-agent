@@ -84,11 +84,87 @@ CREATE TABLE IF NOT EXISTS share_history (
   UNIQUE(request, target, video_id)
 );
 
+CREATE TABLE IF NOT EXISTS works (
+  aweme_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  cover TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'video',
+  published_at TEXT NOT NULL DEFAULT '',
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS work_stats (
+  aweme_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  plays INTEGER NOT NULL DEFAULT 0,
+  likes INTEGER NOT NULL DEFAULT 0,
+  comments INTEGER NOT NULL DEFAULT 0,
+  shares INTEGER NOT NULL DEFAULT 0,
+  favorites INTEGER NOT NULL DEFAULT 0,
+  raw TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (aweme_id, day)
+);
+
+CREATE TABLE IF NOT EXISTS account_stats (
+  day TEXT PRIMARY KEY,
+  followers INTEGER NOT NULL DEFAULT 0,
+  following INTEGER NOT NULL DEFAULT 0,
+  likes INTEGER NOT NULL DEFAULT 0,
+  works INTEGER NOT NULL DEFAULT 0,
+  raw TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS content_plans (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_date TEXT NOT NULL,
+  slot TEXT NOT NULL DEFAULT '',
+  pillar TEXT NOT NULL DEFAULT '',
+  topic TEXT NOT NULL DEFAULT '',
+  angle TEXT NOT NULL DEFAULT '',
+  script TEXT NOT NULL DEFAULT '',
+  caption TEXT NOT NULL DEFAULT '',
+  hashtags TEXT NOT NULL DEFAULT '[]',
+  cover_text TEXT NOT NULL DEFAULT '',
+  cover_bg TEXT NOT NULL DEFAULT '',
+  cover_path TEXT NOT NULL DEFAULT '',
+  video_path TEXT NOT NULL DEFAULT '',
+  music_note TEXT NOT NULL DEFAULT '',
+  source_notes TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'idea',
+  compliance TEXT NOT NULL DEFAULT '{}',
+  publish_at TEXT NOT NULL DEFAULT '',
+  aweme_id TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS contacts (
+  target_key TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  avatar TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '[]',
+  stage TEXT NOT NULL DEFAULT 'new',
+  note TEXT NOT NULL DEFAULT '',
+  score INTEGER NOT NULL DEFAULT 0,
+  last_incoming TEXT NOT NULL DEFAULT '',
+  last_reply TEXT NOT NULL DEFAULT '',
+  last_seen TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_actions_day ON actions(day, kind, status);
 CREATE INDEX IF NOT EXISTS idx_actions_video ON actions(video_id, kind, status);
 CREATE INDEX IF NOT EXISTS idx_actions_created ON actions(created_at);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_replies_day ON replies(created_at);
+CREATE INDEX IF NOT EXISTS idx_work_stats_day ON work_stats(day);
+CREATE INDEX IF NOT EXISTS idx_content_plans_date ON content_plans(plan_date, status);
+CREATE INDEX IF NOT EXISTS idx_contacts_stage ON contacts(stage, updated_at);
 """
 
 
@@ -117,6 +193,10 @@ def db() -> Iterable[sqlite3.Connection]:
 def init_db() -> None:
     with _LOCK, db() as conn:
         conn.executescript(SCHEMA)
+        # 旧库升级：新增列不会自动出现在已存在的表里。
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(content_plans)")}
+        if "cover_bg" not in columns:
+            conn.execute("ALTER TABLE content_plans ADD COLUMN cover_bg TEXT NOT NULL DEFAULT ''")
         row = conn.execute("SELECT data FROM settings WHERE id = 1").fetchone()
         if row is None:
             fresh = AgentSettings().model_dump()
@@ -463,3 +543,394 @@ def today_counts() -> dict[str, int]:
         "dm": count_actions_today("dm"),
         "publish": count_actions_today("publish"),
     }
+
+
+def _json_value(value: str | None, default: Any) -> Any:
+    try:
+        return json.loads(value or "")
+    except (TypeError, ValueError):
+        return default
+
+
+def upsert_work(work: dict[str, Any], *, day: str | None = None) -> None:
+    aweme_id = str(work.get("aweme_id") or "").strip()
+    if not aweme_id:
+        return
+    now = now_iso()
+    with _LOCK, db() as conn:
+        conn.execute(
+            """INSERT INTO works (aweme_id, title, cover, url, kind, published_at, first_seen, last_seen)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(aweme_id) DO UPDATE SET
+                 title=excluded.title, cover=excluded.cover, url=excluded.url,
+                 kind=excluded.kind, published_at=excluded.published_at, last_seen=excluded.last_seen""",
+            (
+                aweme_id,
+                str(work.get("title") or "")[:1000],
+                str(work.get("cover") or ""),
+                str(work.get("url") or ""),
+                str(work.get("kind") or "video"),
+                str(work.get("published_at") or ""),
+                now,
+                now,
+            ),
+        )
+
+
+def list_works_with_latest(limit: int = 50) -> list[dict[str, Any]]:
+    limit = max(1, min(limit, 200))
+    with _LOCK, db() as conn:
+        rows = conn.execute(
+            """SELECT w.*, s.day AS stats_day, s.plays, s.likes, s.comments, s.shares, s.favorites
+               FROM works w
+               LEFT JOIN work_stats s ON s.aweme_id = w.aweme_id
+                 AND s.day = (SELECT MAX(day) FROM work_stats WHERE aweme_id = w.aweme_id)
+               ORDER BY COALESCE(NULLIF(w.published_at, ''), w.last_seen) DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def work_history(aweme_id: str, limit: int = 30) -> list[dict[str, Any]]:
+    limit = max(1, min(limit, 120))
+    with _LOCK, db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM work_stats WHERE aweme_id=? ORDER BY day DESC LIMIT ?",
+            (aweme_id, limit),
+        ).fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["raw"] = _json_value(item.get("raw"), {})
+        out.append(item)
+    return out
+
+
+def latest_work_stats(aweme_id: str) -> dict[str, Any] | None:
+    with _LOCK, db() as conn:
+        row = conn.execute(
+            "SELECT * FROM work_stats WHERE aweme_id=? ORDER BY day DESC LIMIT 1",
+            (aweme_id,),
+        ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["raw"] = _json_value(item.get("raw"), {})
+    return item
+
+
+def save_work_stats(aweme_id: str, stats: dict[str, Any], *, day: str | None = None) -> None:
+    if not aweme_id:
+        return
+    day = day or today_key()
+    with _LOCK, db() as conn:
+        conn.execute(
+            """INSERT INTO work_stats
+               (aweme_id, day, plays, likes, comments, shares, favorites, raw, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(aweme_id, day) DO UPDATE SET
+                 plays=excluded.plays, likes=excluded.likes, comments=excluded.comments,
+                 shares=excluded.shares, favorites=excluded.favorites, raw=excluded.raw,
+                 created_at=excluded.created_at""",
+            (
+                aweme_id,
+                day,
+                int(stats.get("plays") or 0),
+                int(stats.get("likes") or 0),
+                int(stats.get("comments") or 0),
+                int(stats.get("shares") or 0),
+                int(stats.get("favorites") or 0),
+                json.dumps(stats.get("raw") or stats, ensure_ascii=False, default=str),
+                now_iso(),
+            ),
+        )
+
+
+def save_account_stats(stats: dict[str, Any], *, day: str | None = None) -> None:
+    day = day or today_key()
+    with _LOCK, db() as conn:
+        conn.execute(
+            """INSERT INTO account_stats (day, followers, following, likes, works, raw, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(day) DO UPDATE SET
+                 followers=excluded.followers, following=excluded.following,
+                 likes=excluded.likes, works=excluded.works, raw=excluded.raw,
+                 created_at=excluded.created_at""",
+            (
+                day,
+                int(stats.get("followers") or 0),
+                int(stats.get("following") or 0),
+                int(stats.get("likes") or 0),
+                int(stats.get("works") or 0),
+                json.dumps(stats.get("raw") or stats, ensure_ascii=False, default=str),
+                now_iso(),
+            ),
+        )
+
+
+def latest_account_stats() -> dict[str, Any] | None:
+    with _LOCK, db() as conn:
+        row = conn.execute("SELECT * FROM account_stats ORDER BY day DESC LIMIT 1").fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["raw"] = _json_value(item.get("raw"), {})
+    return item
+
+
+def analytics_overview(limit: int = 30) -> dict[str, Any]:
+    limit = max(1, min(limit, 100))
+    with _LOCK, db() as conn:
+        account_row = conn.execute("SELECT * FROM account_stats ORDER BY day DESC LIMIT 1").fetchone()
+        work_rows = conn.execute(
+            """SELECT w.*, s.day AS stats_day, s.plays, s.likes, s.comments, s.shares, s.favorites
+               FROM works w
+               LEFT JOIN work_stats s ON s.aweme_id = w.aweme_id
+                 AND s.day = (SELECT MAX(day) FROM work_stats WHERE aweme_id = w.aweme_id)
+               ORDER BY COALESCE(s.plays, 0) DESC, w.last_seen DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        total_row = conn.execute(
+            """SELECT COALESCE(SUM(plays),0) AS plays, COALESCE(SUM(likes),0) AS likes,
+                      COALESCE(SUM(comments),0) AS comments, COALESCE(SUM(shares),0) AS shares
+               FROM work_stats s
+               WHERE s.day = (SELECT MAX(day) FROM work_stats WHERE aweme_id = s.aweme_id)"""
+        ).fetchone()
+        count_row = conn.execute("SELECT COUNT(*) AS n FROM works").fetchone()
+        trend_rows = conn.execute(
+            """SELECT day, SUM(plays) AS plays, SUM(likes) AS likes,
+                      SUM(comments) AS comments, SUM(shares) AS shares
+               FROM work_stats GROUP BY day ORDER BY day DESC LIMIT 14"""
+        ).fetchall()
+    account = dict(account_row) if account_row else {
+        "day": "", "followers": 0, "following": 0, "likes": 0, "works": 0
+    }
+    if account_row:
+        account["raw"] = _json_value(account.get("raw"), {})
+    works = [dict(r) for r in work_rows]
+    totals = dict(total_row) if total_row else {"plays": 0, "likes": 0, "comments": 0, "shares": 0}
+    for key in ("plays", "likes", "comments", "shares"):
+        totals[key] = int(totals.get(key) or 0)
+    trend = [dict(r) for r in reversed(trend_rows)]
+    for row in trend:
+        for key in ("plays", "likes", "comments", "shares"):
+            row[key] = int(row.get(key) or 0)
+    return {
+        "account": account,
+        "totals": totals,
+        "work_count": int(count_row["n"]) if count_row else 0,
+        "works": works,
+        "trend": trend,
+        "updated_at": now_iso(),
+    }
+
+
+_PLAN_FIELDS = {
+    "plan_date", "slot", "pillar", "topic", "angle", "script", "caption",
+    "hashtags", "cover_text", "cover_bg", "cover_path", "video_path", "music_note",
+    "source_notes", "status", "compliance", "publish_at", "aweme_id", "error",
+}
+
+
+def _plan_public(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["hashtags"] = _json_value(item.get("hashtags"), [])
+    item["compliance"] = _json_value(item.get("compliance"), {})
+    return item
+
+
+def create_content_plan(fields: dict[str, Any]) -> int:
+    now = now_iso()
+    data = {key: fields.get(key, "") for key in _PLAN_FIELDS}
+    data["plan_date"] = str(fields.get("plan_date") or today_key())
+    data["status"] = str(fields.get("status") or "idea")
+    data["hashtags"] = json.dumps(fields.get("hashtags") or [], ensure_ascii=False)
+    data["compliance"] = json.dumps(fields.get("compliance") or {}, ensure_ascii=False)
+    with _LOCK, db() as conn:
+        cur = conn.execute(
+            """INSERT INTO content_plans
+               (plan_date, slot, pillar, topic, angle, script, caption, hashtags, cover_text,
+                cover_bg, cover_path, video_path, music_note, source_notes, status, compliance,
+                publish_at, aweme_id, error, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                data["plan_date"], data["slot"], data["pillar"], data["topic"], data["angle"],
+                data["script"], data["caption"], data["hashtags"], data["cover_text"],
+                data["cover_bg"], data["cover_path"], data["video_path"], data["music_note"], data["source_notes"],
+                data["status"], data["compliance"], data["publish_at"], data["aweme_id"],
+                data["error"], now, now,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def update_content_plan(plan_id: int, **fields: Any) -> dict[str, Any] | None:
+    updates = {k: v for k, v in fields.items() if k in _PLAN_FIELDS}
+    if "hashtags" in updates:
+        updates["hashtags"] = json.dumps(updates["hashtags"] or [], ensure_ascii=False)
+    if "compliance" in updates:
+        updates["compliance"] = json.dumps(updates["compliance"] or {}, ensure_ascii=False)
+    if updates:
+        updates["updated_at"] = now_iso()
+        columns = ", ".join(f"{k}=?" for k in updates)
+        with _LOCK, db() as conn:
+            conn.execute(f"UPDATE content_plans SET {columns} WHERE id=?", (*updates.values(), plan_id))
+    return get_content_plan(plan_id)
+
+
+def get_content_plan(plan_id: int) -> dict[str, Any] | None:
+    with _LOCK, db() as conn:
+        row = conn.execute("SELECT * FROM content_plans WHERE id=?", (plan_id,)).fetchone()
+    return _plan_public(row) if row else None
+
+
+def list_content_plans(
+    date_from: str = "",
+    date_to: str = "",
+    status: str = "",
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    where = []
+    params: list[Any] = []
+    if date_from:
+        where.append("plan_date >= ?")
+        params.append(date_from)
+    if date_to:
+        where.append("plan_date <= ?")
+        params.append(date_to)
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    with _LOCK, db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM content_plans{clause} ORDER BY plan_date DESC, id DESC LIMIT ?",
+            (*params, max(1, min(limit, 500))),
+        ).fetchall()
+    return [_plan_public(row) for row in rows]
+
+
+def due_content_plans(now_value: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    now_value = now_value or now_iso()
+    with _LOCK, db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM content_plans
+               WHERE status='approved' AND publish_at != '' AND publish_at <= ?
+               ORDER BY publish_at ASC LIMIT ?""",
+            (now_value, max(1, min(limit, 50))),
+        ).fetchall()
+    return [_plan_public(row) for row in rows]
+
+
+def upsert_contact(
+    target_key: str,
+    *,
+    name: str = "",
+    avatar: str = "",
+    last_incoming: str = "",
+    last_reply: str = "",
+    seen: bool = True,
+) -> None:
+    target_key = (target_key or "").strip()
+    if not target_key:
+        return
+    now = now_iso()
+    with _LOCK, db() as conn:
+        conn.execute(
+            """INSERT INTO contacts (target_key, name, avatar, tags, stage, note, score,
+                                     last_incoming, last_reply, last_seen, updated_at)
+               VALUES (?, ?, ?, '[]', 'new', '', 0, ?, ?, ?, ?)
+               ON CONFLICT(target_key) DO UPDATE SET
+                 name=CASE WHEN excluded.name != '' THEN excluded.name ELSE contacts.name END,
+                 avatar=CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE contacts.avatar END,
+                 last_incoming=CASE WHEN excluded.last_incoming != '' THEN excluded.last_incoming ELSE contacts.last_incoming END,
+                 last_reply=CASE WHEN excluded.last_reply != '' THEN excluded.last_reply ELSE contacts.last_reply END,
+                 last_seen=CASE WHEN ? THEN excluded.last_seen ELSE contacts.last_seen END,
+                 updated_at=excluded.updated_at""",
+            (target_key, name, avatar, last_incoming, last_reply, now if seen else "", now, int(seen)),
+        )
+
+
+def get_contact(target_key: str) -> dict[str, Any] | None:
+    with _LOCK, db() as conn:
+        row = conn.execute("SELECT * FROM contacts WHERE target_key=?", (target_key,)).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["tags"] = _json_value(item.get("tags"), [])
+    return item
+
+
+def list_contacts(q: str = "", stage: str = "", tag: str = "", limit: int = 200) -> list[dict[str, Any]]:
+    where = []
+    params: list[Any] = []
+    if q:
+        where.append("(name LIKE ? OR last_incoming LIKE ? OR note LIKE ?)")
+        like = f"%{q}%"
+        params.extend([like, like, like])
+    if stage:
+        where.append("stage=?")
+        params.append(stage)
+    if tag:
+        where.append("tags LIKE ?")
+        params.append(f'%"{tag}"%')
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    with _LOCK, db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM contacts{clause} ORDER BY updated_at DESC LIMIT ?",
+            (*params, max(1, min(limit, 500))),
+        ).fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["tags"] = _json_value(item.get("tags"), [])
+        out.append(item)
+    return out
+
+
+def update_contact(
+    target_key: str,
+    *,
+    tags: list[str] | None = None,
+    stage: str | None = None,
+    note: str | None = None,
+    score: int | None = None,
+) -> dict[str, Any] | None:
+    updates: dict[str, Any] = {}
+    if tags is not None:
+        updates["tags"] = json.dumps(tags, ensure_ascii=False)
+    if stage is not None:
+        updates["stage"] = stage
+    if note is not None:
+        updates["note"] = note[:2000]
+    if score is not None:
+        updates["score"] = int(score)
+    if updates:
+        updates["updated_at"] = now_iso()
+        columns = ", ".join(f"{k}=?" for k in updates)
+        with _LOCK, db() as conn:
+            conn.execute(f"UPDATE contacts SET {columns} WHERE target_key=?", (*updates.values(), target_key))
+    return get_contact(target_key)
+
+
+def delete_contact(target_key: str) -> None:
+    with _LOCK, db() as conn:
+        conn.execute("DELETE FROM contacts WHERE target_key=?", (target_key,))
+
+
+def crm_overview() -> dict[str, Any]:
+    with _LOCK, db() as conn:
+        total = conn.execute("SELECT COUNT(*) AS n FROM contacts").fetchone()["n"]
+        rows = conn.execute("SELECT stage, COUNT(*) AS n FROM contacts GROUP BY stage").fetchall()
+        recent = conn.execute(
+            "SELECT * FROM contacts ORDER BY updated_at DESC LIMIT 8"
+        ).fetchall()
+    stages = {str(r["stage"]): int(r["n"]) for r in rows}
+    recent_items = []
+    for row in recent:
+        item = dict(row)
+        item["tags"] = _json_value(item.get("tags"), [])
+        recent_items.append(item)
+    return {"total": int(total), "stages": stages, "recent": recent_items}

@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from . import db
+from . import content, crm, db
 from .agent import runner
-from .browser import BrowserError, LoginRequired, RiskControl
+from .analytics import analytics
+from .browser import NAV_BADGES_JS, BrowserError, LoginRequired, RiskControl
 from .chat import ChatBusy, cache_summary, chat as chat_service
 from .config import (
     DEBUG_DIR,
@@ -27,7 +30,11 @@ from .config import (
     settings_public,
 )
 from .events import bus
+from .liveview import get_liveview, init_liveview
 from .llm import DeepSeekDecider, LLMError
+from .operator import operator
+from .planner import planner
+from .publisher import publisher
 from .replier import AutoReplier
 from .sharer import AutoSharer, share_one_to_contact
 
@@ -36,10 +43,26 @@ from .sharer import AutoSharer, share_one_to_contact
 async def lifespan(app: FastAPI):
     ensure_dirs()
     db.init_db()
+    init_liveview(runner.browser, runner)
     await replier.apply_settings()
     await sharer.apply_settings()
     await chat_service.start()
+    await publisher.start()
+    await planner.start()
+    await operator.start()
     yield
+    try:
+        await operator.stop()
+    except Exception:
+        pass
+    try:
+        await planner.stop()
+    except Exception:
+        pass
+    try:
+        await publisher.stop()
+    except Exception:
+        pass
     try:
         await chat_service.stop()
     except Exception:
@@ -104,6 +127,50 @@ class ChatVideoBody(BaseModel):
     cover: str = Field(default="", max_length=1200)
 
 
+class ContentGenerateBody(BaseModel):
+    brief: str = Field(default="", max_length=1200)
+    pillar: str = Field(default="", max_length=80)
+    plan_date: str = Field(default="", max_length=20)
+    slot: str = Field(default="", max_length=40)
+
+
+class ContentUpdateBody(BaseModel):
+    plan_date: str | None = Field(default=None, max_length=20)
+    slot: str | None = Field(default=None, max_length=40)
+    pillar: str | None = Field(default=None, max_length=80)
+    topic: str | None = Field(default=None, max_length=300)
+    angle: str | None = Field(default=None, max_length=500)
+    script: str | None = Field(default=None, max_length=8000)
+    caption: str | None = Field(default=None, max_length=2000)
+    hashtags: list[str] | None = None
+    cover_text: str | None = Field(default=None, max_length=120)
+    cover_bg: str | None = Field(default=None, max_length=20)
+    music_note: str | None = Field(default=None, max_length=500)
+    source_notes: str | None = Field(default=None, max_length=1000)
+    publish_at: str | None = Field(default=None, max_length=30)
+    video_path: str | None = Field(default=None, max_length=500)
+
+
+class ContentRejectBody(BaseModel):
+    reason: str = Field(default="", max_length=300)
+
+
+class ContentPublishBody(BaseModel):
+    confirm: bool = False
+
+
+class AnalyticsRefreshBody(BaseModel):
+    detail: bool = False
+    limit: int = Field(default=30, ge=1, le=100)
+
+
+class CrmUpdateBody(BaseModel):
+    tags: list[str] | None = None
+    stage: str | None = Field(default=None, max_length=30)
+    note: str | None = Field(default=None, max_length=2000)
+    score: int | None = Field(default=None, ge=0, le=100)
+
+
 def _chat_error(exc: Exception) -> HTTPException:
     if isinstance(exc, LoginRequired):
         return HTTPException(status_code=400, detail=str(exc))
@@ -125,7 +192,43 @@ async def status() -> dict[str, Any]:
     data["settings"] = settings_public(runner.settings, bool(load_api_key()))
     data["replier"] = replier.status()
     data["sharer"] = sharer.status()
+    data["analytics"] = analytics.status()
+    data["publisher"] = publisher.status()
+    data["planner"] = planner.status()
+    data["operator"] = operator.status()
+    data["live"] = get_liveview().status()
+    data["crm"] = crm.overview()
     return data
+
+
+@app.websocket("/api/live/ws")
+async def live_ws(websocket: WebSocket) -> None:
+    await websocket.accept()
+    view = get_liveview()
+    queue = await view.subscribe()
+    try:
+        await websocket.send_text(json.dumps({"type": "hello", **view.status()}, ensure_ascii=False))
+        while True:
+            frame = await queue.get()
+            await websocket.send_bytes(base64.b64decode(frame))
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        await view.unsubscribe(queue)
+
+
+@app.get("/api/debug/nav")
+async def debug_nav() -> dict[str, Any]:
+    page = runner.browser.page
+    if page is None or page.is_closed():
+        return {"ok": False, "detail": "浏览器页面未就绪"}
+    try:
+        data = await page.evaluate(NAV_BADGES_JS)
+    except Exception as exc:
+        return {"ok": False, "detail": str(exc)[:200]}
+    return {"ok": True, "url": page.url, "data": data}
 
 
 @app.get("/api/settings")
@@ -238,11 +341,11 @@ async def stop_agent() -> dict[str, Any]:
 
 @app.post("/api/replier/check")
 async def replier_check() -> dict[str, Any]:
-    if replier.busy:
-        raise HTTPException(status_code=409, detail="自动回复正在检查中")
     if not db.load_settings().auto_reply:
         raise HTTPException(status_code=400, detail="先在设置里开启自动回复")
-    return await replier.check_once()
+    if not replier.running:
+        await replier.start()
+    return await replier.check_once(manual=True)
 
 
 @app.get("/api/chat/summary")
@@ -449,6 +552,231 @@ async def unfollow_fan(body: FollowFanBody) -> dict[str, Any]:
     )
     result["action_id"] = action_id
     return result
+
+
+@app.get("/api/analytics/overview")
+async def analytics_overview(limit: int = Query(default=30, ge=1, le=100)) -> dict[str, Any]:
+    data = db.analytics_overview(limit)
+    data["ok"] = True
+    data["status"] = analytics.status()
+    return data
+
+
+@app.post("/api/analytics/refresh")
+async def analytics_refresh(body: AnalyticsRefreshBody) -> dict[str, Any]:
+    try:
+        return await analytics.refresh(detail=body.detail, limit=body.limit)
+    except LoginRequired as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except BrowserError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"刷新数据失败：{str(exc)[:200]}") from exc
+
+
+@app.get("/api/analytics/works/{aweme_id}/history")
+async def analytics_work_history(
+    aweme_id: str,
+    limit: int = Query(default=30, ge=1, le=120),
+) -> dict[str, Any]:
+    return {"ok": True, "items": db.work_history(aweme_id, limit)}
+
+
+@app.get("/api/content/plans")
+async def content_plans(
+    date_from: str = Query(default=""),
+    date_to: str = Query(default=""),
+    plan_status: str = Query(default="", alias="status"),
+) -> dict[str, Any]:
+    return {"ok": True, "items": content.list_plans(date_from, date_to, plan_status)}
+
+
+@app.get("/api/content/plans/{plan_id}")
+async def content_plan_detail(plan_id: int) -> dict[str, Any]:
+    plan = content.get_plan(plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="内容计划不存在")
+    return {"ok": True, "plan": plan}
+
+
+@app.post("/api/content/generate")
+async def content_generate(body: ContentGenerateBody) -> dict[str, Any]:
+    try:
+        plan = await content.generate_plan(
+            brief=body.brief,
+            pillar=body.pillar,
+            plan_date=body.plan_date,
+            slot=body.slot,
+        )
+    except LLMError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"生成内容失败：{str(exc)[:200]}") from exc
+    return {"ok": True, "plan": plan}
+
+
+@app.put("/api/content/plans/{plan_id}")
+async def content_plan_update(plan_id: int, body: ContentUpdateBody) -> dict[str, Any]:
+    fields = {key: value for key, value in body.model_dump().items() if value is not None}
+    plan = content.update_plan(plan_id, fields)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="内容计划不存在")
+    return {"ok": True, "plan": plan}
+
+
+@app.post("/api/content/plans/{plan_id}/cover")
+async def content_plan_cover(plan_id: int) -> dict[str, Any]:
+    plan = db.get_content_plan(plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="内容计划不存在")
+    try:
+        path = await content.render_cover(plan)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"生成封面失败：{str(exc)[:200]}") from exc
+    updated = content.update_plan(plan_id, {"cover_path": path})
+    return {"ok": True, "plan": updated, "cover_url": f"/media/{path}"}
+
+
+@app.post("/api/content/plans/{plan_id}/approve")
+async def content_plan_approve(plan_id: int) -> dict[str, Any]:
+    try:
+        plan = await content.approve_plan(plan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "plan": plan}
+
+
+@app.post("/api/content/plans/{plan_id}/reject")
+async def content_plan_reject(plan_id: int, body: ContentRejectBody) -> dict[str, Any]:
+    try:
+        plan = await content.reject_plan(plan_id, body.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "plan": plan}
+
+
+@app.post("/api/content/plans/{plan_id}/upload")
+async def content_plan_upload(
+    plan_id: int,
+    kind: str = Query(default="video"),
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    plan = db.get_content_plan(plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="内容计划不存在")
+    if kind not in ("video", "cover"):
+        raise HTTPException(status_code=400, detail="kind 只能是 video 或 cover")
+    data = await file.read()
+    if len(data) > 400 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件太大（上限 400MB）")
+    try:
+        path = content.save_upload(plan_id, kind, file.filename or "", data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    fields = {"video_path": path} if kind == "video" else {"cover_path": path}
+    updated = content.update_plan(plan_id, fields)
+    return {"ok": True, "plan": updated, "path": path, "url": f"/media/{path}"}
+
+
+@app.post("/api/planner/tick")
+async def planner_tick() -> dict[str, Any]:
+    try:
+        return await planner.tick()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"自动排期失败：{str(exc)[:240]}") from exc
+
+
+@app.post("/api/content/creator/show")
+async def content_creator_show() -> dict[str, Any]:
+    try:
+        return await publisher.open_creator(keep_open=True, show=True)
+    except (LoginRequired, BrowserError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"打开创作者中心失败：{str(exc)[:240]}") from exc
+
+
+@app.post("/api/content/creator/open")
+async def content_creator_open() -> dict[str, Any]:
+    try:
+        return await publisher.open_creator()
+    except (LoginRequired, BrowserError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"打开创作者中心失败：{str(exc)[:240]}") from exc
+
+
+@app.post("/api/content/plans/{plan_id}/publish")
+async def content_plan_publish(plan_id: int, body: ContentPublishBody) -> dict[str, Any]:
+    plan = db.get_content_plan(plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="内容计划不存在")
+    if not body.confirm:
+        try:
+            prepared = await content.prepare_publish(plan)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "status": "ready",
+            "detail": "检查通过；确认后会打开创作者中心上传并发布",
+            "compliance": prepared["compliance"],
+        }
+    try:
+        return await publisher.publish(plan, dry_run=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (LoginRequired, BrowserError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"发布失败：{str(exc)[:300]}") from exc
+
+
+@app.get("/api/crm/contacts")
+async def crm_contacts(
+    q: str = Query(default=""),
+    stage: str = Query(default=""),
+    tag: str = Query(default=""),
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "items": db.list_contacts(q=q, stage=stage, tag=tag),
+        "overview": crm.overview(),
+    }
+
+
+@app.get("/api/crm/contacts/{target_key}")
+async def crm_contact(target_key: str) -> dict[str, Any]:
+    contact = db.get_contact(target_key)
+    if not contact:
+        raise HTTPException(status_code=404, detail="联系人不存在")
+    return {"ok": True, "contact": contact}
+
+
+@app.put("/api/crm/contacts/{target_key}")
+async def crm_contact_update(target_key: str, body: CrmUpdateBody) -> dict[str, Any]:
+    if body.stage is not None and body.stage not in crm.STAGES:
+        raise HTTPException(status_code=400, detail="无效的跟进阶段")
+    contact = db.update_contact(
+        target_key,
+        tags=body.tags,
+        stage=body.stage,
+        note=body.note,
+        score=body.score,
+    )
+    if not contact:
+        raise HTTPException(status_code=404, detail="联系人不存在")
+    return {"ok": True, "contact": contact}
+
+
+@app.post("/api/crm/contacts/{target_key}/analyze")
+async def crm_contact_analyze(target_key: str) -> dict[str, Any]:
+    try:
+        return {"ok": True, **(await crm.analyze_contact(target_key))}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LLMError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/actions")

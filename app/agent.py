@@ -28,6 +28,9 @@ class AgentRunner:
         self.last_decision: dict[str, Any] | None = None
         self._lock = asyncio.Lock()
         self.exclusive = asyncio.Lock()
+        self.run_pending = False
+        self.share_pending = False
+        self.reply_pending = False
         self._comments_warned = False
 
     def refresh_settings(self) -> AgentSettings:
@@ -81,7 +84,14 @@ class AgentRunner:
             level="warn",
         )
 
-    async def _act(self, kind: str, video: dict[str, Any], content: str = "", mention: str = "") -> str:
+    async def _act(
+        self,
+        kind: str,
+        video: dict[str, Any],
+        content: str = "",
+        mention: str = "",
+        send_text: str = "",
+    ) -> str:
         vid = str(video.get("aweme_id") or "")
         author = str(video.get("author") or "")
         author_url = str(video.get("author_url") or "")
@@ -114,7 +124,7 @@ class AgentRunner:
             if kind == "like":
                 result = await self.browser.like()
             elif kind == "comment":
-                result = await self.browser.comment(content, mention=mention)
+                result = await self.browser.comment(send_text or content, mention=mention)
             elif kind == "dm":
                 result = await self.browser.dm(author_url, author, content)
             else:
@@ -157,7 +167,14 @@ class AgentRunner:
     async def run_once(self) -> dict[str, Any]:
         if self._lock.locked():
             return {"ok": False, "error": "已经有一轮在跑"}
+        self.run_pending = True
+        await bus.emit(
+            "run_state",
+            "已排队：等自动回复/分享用完浏览器就开始这一轮",
+            {"reason": "waiting_browser"},
+        )
         async with self._lock, self.exclusive:
+            self.run_pending = False
             self.running = True
             self.stop_requested = False
             self._stop_event = asyncio.Event()
@@ -194,6 +211,9 @@ class AgentRunner:
                 for index in range(self.settings.max_videos_per_run):
                     if self.stop_requested:
                         reason = "stopped"
+                        break
+                    if self.reply_pending:
+                        reason = "reply_pending"
                         break
                     await self.browser.assert_safe()
                     try:
@@ -276,7 +296,11 @@ class AgentRunner:
                         check = policy.check_comment(video, body, self.settings)
                         if check.allowed:
                             comment_status = await self._act(
-                                "comment", video, full_comment, mention=mention
+                                "comment",
+                                video,
+                                full_comment,
+                                mention=mention,
+                                send_text=body,
                             )
                             if comment_status in ("sent", "uncertain", "dry_run"):
                                 acted += 1
@@ -366,6 +390,7 @@ class AgentRunner:
                 return {"ok": False, "error": str(exc)}
             finally:
                 self.running = False
+                self.run_pending = False
                 try:
                     await bus.emit(
                         "run_state",

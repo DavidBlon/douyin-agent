@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
+  BarChart3,
+  CalendarDays,
   ExternalLink,
   ListChecks,
   PanelLeftClose,
@@ -8,6 +10,7 @@ import {
   Shield,
   SlidersHorizontal,
   Square,
+  UsersRound,
   Wifi,
   WifiOff,
 } from "lucide-react";
@@ -27,22 +30,31 @@ import { Drawer, StatusBadge, Toast, TypeBadge } from "./components/ui";
 import { RunPage } from "./pages/RunPage";
 import { ActionsPage } from "./pages/ActionsPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { ContentPage } from "./pages/ContentPage";
+import { AnalyticsPage } from "./pages/AnalyticsPage";
+import { CrmPage } from "./pages/CrmPage";
 
 const navItems: { tab: Tab; label: string; icon: typeof Activity }[] = [
   { tab: "run", label: "运行台", icon: Activity },
+  { tab: "content", label: "内容", icon: CalendarDays },
+  { tab: "analytics", label: "数据", icon: BarChart3 },
+  { tab: "crm", label: "客户", icon: UsersRound },
   { tab: "actions", label: "动作记录", icon: ListChecks },
   { tab: "settings", label: "设置", icon: SlidersHorizontal },
 ];
 
 const pageMeta: Record<Tab, string> = {
   run: "运行台",
+  content: "内容",
+  analytics: "数据",
+  crm: "客户",
   actions: "动作记录",
   settings: "设置",
 };
 
 const TAB_KEY = "douyin-agent-tab";
 const SIDEBAR_KEY = "douyin-agent-sidebar";
-const TABS: Tab[] = ["run", "actions", "settings"];
+const TABS: Tab[] = ["run", "content", "analytics", "crm", "actions", "settings"];
 
 function initialTab(): Tab {
   try {
@@ -228,7 +240,7 @@ export default function App() {
     setBusy("run");
     try {
       await api.run();
-      notify("已开始一轮，动作会实时出现在下面。", "ok");
+      notify("已提交一轮：若自动回复/分享正占用浏览器会先排队，实时动作里会显示进度。", "ok");
       window.setTimeout(() => { void refreshStatus(); }, 500);
     } catch (e) {
       notify(`启动失败：${(e as Error).message}`, "error");
@@ -254,7 +266,9 @@ export default function App() {
     setBusy("replier");
     try {
       const result = await api.checkReplier();
-      if (result.skipped) {
+      if (result.queued) {
+        notify(result.detail || "浏览器正被其他任务占用，已排队，空闲后立即检查", "ok");
+      } else if (result.skipped) {
         notify("自动回复这轮跳过：" + result.skipped, "warn");
       } else {
         notify(`检查完成：私信回复 ${result.dm ?? 0} 条，评论回复 ${result.comment ?? 0} 条。`, "ok");
@@ -342,6 +356,43 @@ export default function App() {
       setBusy("");
     }
   }, [settings, notify]);
+
+  const handleToggleAutoOperate = useCallback(async (next: boolean) => {
+    if (!settings) return;
+    setBusy("settings");
+    try {
+      const payload: Settings = next
+        ? {
+            ...settings,
+            auto_operate: true,
+            dry_run: false,
+            auto_content: true,
+            auto_video: true,
+            auto_like: true,
+            auto_comment: true,
+            auto_dm: true,
+          }
+        : {
+            ...settings,
+            auto_operate: false,
+            auto_content: false,
+          };
+      const saved = await api.saveSettings({ ...payload, has_api_key: undefined });
+      setSettings(saved);
+      setStatus((prev) => (prev ? { ...prev, settings: saved } : prev));
+      await refreshStatus();
+      notify(
+        next
+          ? "全自动内容与发布已开启：自动选题、成片、发布和刷流互动"
+          : "自动内容与发布已暂停；自动回复/分享不受影响",
+        next ? "ok" : "warn",
+      );
+    } catch (e) {
+      notify(`切换失败：${(e as Error).message}`, "error");
+    } finally {
+      setBusy("");
+    }
+  }, [settings, notify, refreshStatus]);
 
   const handleSaved = useCallback(async (next: Settings) => {
     setSettings(next);
@@ -463,9 +514,19 @@ export default function App() {
               onStop={handleStop}
               onOpenBrowser={handleOpenBrowser}
               onToggleDryRun={handleToggleDryRun}
+              onToggleAutoOperate={handleToggleAutoOperate}
               onCheckReplier={handleCheckReplier}
               onGoSettings={() => setTab("settings")}
             />
+          ) : null}
+          {tab === "content" ? (
+            <ContentPage settings={settings} notify={notify} />
+          ) : null}
+          {tab === "analytics" ? (
+            <AnalyticsPage notify={notify} />
+          ) : null}
+          {tab === "crm" ? (
+            <CrmPage notify={notify} />
           ) : null}
           {tab === "actions" ? (
             <ActionsPage

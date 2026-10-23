@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import Page
 
-from . import db
+from . import crm, db
 from .agent import runner
 from .browser import ActionError, BrowserError, LoginRequired, RiskControl
 from .events import bus
@@ -54,8 +54,19 @@ def _to_int(value: Any) -> int:
         return 0
 
 
+def _avatar_seed(value: str) -> str:
+    """头像 CDN 域名会轮换，只用 path 作为稳定种子，避免会话 key 漂移。"""
+    url = _base_url(value)
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        return parsed.path or url
+    return url
+
+
 def conversation_key(raw: dict[str, Any]) -> str:
-    seed = _base_url(str(raw.get("avatar") or "")) or str(raw.get("title") or "")
+    seed = _avatar_seed(str(raw.get("avatar") or "")) or str(raw.get("title") or "")
     return "dm:" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:20]
 
 
@@ -110,6 +121,10 @@ def remember_conversations(raws: list[dict[str, Any]]) -> list[dict[str, Any]]:
     _UPDATED_AT = _iso_now()
     _UPDATED_MONO = now
     _LAST_ERROR = ""
+    try:
+        crm.sync_conversations(out)
+    except Exception:
+        pass
     return out
 
 
@@ -275,7 +290,24 @@ def normalize_transcript(
                 "system": is_system,
             }
         )
-    return messages[-80:]
+    return _fill_self_avatar(messages[-80:])
+
+
+_SELF_AVATAR = ""
+
+
+def _fill_self_avatar(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """分享卡片等消息可能读不到头像，用同批里自己消息的头像补齐，避免显示占位字。"""
+    global _SELF_AVATAR
+    for item in messages:
+        if not item.get("incoming") and not item.get("system") and item.get("avatar"):
+            _SELF_AVATAR = str(item["avatar"])
+            break
+    if _SELF_AVATAR:
+        for item in messages:
+            if not item.get("incoming") and not item.get("system") and not item.get("avatar"):
+                item["avatar"] = _SELF_AVATAR
+    return messages
 
 
 def _conversation_is_fresh(messages: list[dict[str, Any]], target: dict[str, Any]) -> bool:
@@ -308,6 +340,22 @@ class ChatService:
             return
         self._stop = asyncio.Event()
         self._monitor = asyncio.create_task(self._monitor_loop())
+        asyncio.create_task(self._prewarm())
+
+    async def _prewarm(self) -> None:
+        """启动后提前把收件箱页拉起来，避免用户第一次打开会话时冷启动等待。"""
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=8)
+            return
+        except asyncio.TimeoutError:
+            pass
+        async with self._op_lock:
+            try:
+                page = await self._ensure_page()
+                if page is not None:
+                    await self._list_raw(page)
+            except Exception:
+                pass
 
     async def stop(self) -> None:
         self._stop.set()
@@ -377,10 +425,10 @@ class ChatService:
         await self.browser.ensure_started()
         if not await self.browser.is_logged_in():
             raise LoginRequired("浏览器还没有登录抖音")
-        page = await self.browser.new_page()
+        page = await self.browser.new_page(track=False)
         page.set_default_timeout(20000)
         await page.goto(INBOX_URL, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(2600)
+        await page.wait_for_timeout(1500)
         try:
             await page.evaluate(
                 "() => document.querySelectorAll('video').forEach(v => { v.muted = true; if (v.pause) v.pause(); })"
@@ -489,15 +537,20 @@ class ChatService:
     async def _read_fresh(
         self, page: Page, target: dict[str, Any]
     ) -> tuple[list[dict[str, Any]], bool]:
+        title = str(target.get("title") or "")
         messages: list[dict[str, Any]] = []
-        await page.wait_for_timeout(500)
-        for attempt in range(10):
+        await page.wait_for_timeout(400)
+        for attempt in range(6):
             rows = await self.browser.read_chat_transcript(page)
             messages = normalize_transcript(rows, target)
             if _conversation_is_fresh(messages, target):
                 return messages, True
-            if attempt < 9:
-                await page.wait_for_timeout(700)
+            # 页头标题已经能证明停在正确会话上；内容校验只用于检测“页面还没切过来”。
+            header = await self.browser.chat_header_title(page)
+            if header and (header == title or title in header):
+                return messages, True
+            if attempt < 5:
+                await page.wait_for_timeout(500)
         return messages, False
 
     async def _open_target(
@@ -514,7 +567,9 @@ class ChatService:
             raise ActionError("打开会话失败")
         messages, fresh = await self._read_fresh(page, target)
         if not fresh:
-            raise ActionError("会话内容没有切换，请重试")
+            header = await self.browser.chat_header_title(page)
+            if not (header and (header == title or title in header)):
+                raise ActionError("会话内容没有切换，请重试")
         return messages
 
     async def _open(self, key: str) -> tuple[dict[str, Any], list[dict[str, Any]], Page]:
@@ -608,7 +663,7 @@ class ChatService:
                 if target.get("is_group"):
                     raise ActionError("群聊暂不支持在这里发送")
                 result = await self.browser.send_chat_message(page, text)
-                await page.wait_for_timeout(900)
+                await page.wait_for_timeout(600)
                 rows = await self.browser.read_chat_transcript(page)
                 messages = normalize_transcript(rows, target)
                 set_active(key)
@@ -629,6 +684,10 @@ class ChatService:
             dry_run=False,
         )
         db.update_action(action_id, result=str(result.get("detail") or "")[:400], executed_at=db.now_iso())
+        try:
+            crm.note_reply(str(target.get("key") or conversation_key(target)), text)
+        except Exception:
+            pass
         await bus.emit(
             "chat",
             f"已发送私信给 {target.get('title') or '对方'}",

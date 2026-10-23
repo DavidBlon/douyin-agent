@@ -52,6 +52,12 @@ class AgentSettings(BaseModel):
     auto_comment: bool = True
     auto_dm: bool = True
     auto_publish: bool = False
+    publish_require_approval: bool = True
+    auto_operate: bool = False
+    auto_content: bool = True
+    auto_video: bool = True
+    content_generate_time: str = "07:30"
+    publish_time: str = "18:00"
 
     max_videos_per_run: int = Field(default=8, ge=1, le=30)
     likes_per_day: int = Field(default=30, ge=0, le=300)
@@ -86,6 +92,8 @@ class AgentSettings(BaseModel):
         "不透露个人隐私，不替任何人做承诺。评论最多两行。"
     )
     topics: str = "科技、知识、社会观察、真实经验"
+    content_pillars: str = "经验分享、工具测评、生活记录"
+    crm_auto_tag: bool = True
     dm_allowlist: list[str] = Field(default_factory=list)
     comment_blocklist: list[str] = Field(
         default_factory=lambda: [

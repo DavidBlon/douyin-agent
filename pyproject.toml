@@ -12,6 +12,8 @@ dependencies = [
   "pydantic-settings>=2.7.0",
   "sse-starlette>=2.2.0",
   "httpx>=0.28.0",
+  "python-multipart>=0.0.20",
+  "imageio-ffmpeg>=0.5.1",
 ]
 
 [dependency-groups]

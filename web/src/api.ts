@@ -2,11 +2,15 @@ import type {
   ActionsResponse,
   ActionKind,
   AgentEvent,
+  AnalyticsOverview,
   ChatConversationsResponse,
   ChatMessagesResponse,
   ChatSendResponse,
   ChatSummary,
   ChatVideoResponse,
+  ContentPlan,
+  CrmContactsResponse,
+  Contact,
   FansResponse,
   FollowFanResponse,
   Settings,
@@ -21,6 +25,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...(init?.headers || {}),
     },
   });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = await res.json();
+      if (body?.detail) detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  return (await res.json()) as T;
+}
+
+async function requestForm<T>(path: string, form: FormData): Promise<T> {
+  const res = await fetch(path, { method: "POST", body: form });
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
     try {
@@ -49,7 +68,7 @@ export const api = {
   testLLM: () => request<{ ok: boolean; text?: string; error?: string }>("/api/llm/test", { method: "POST" }),
   run: () => request<{ ok: boolean; accepted: boolean }>("/api/run", { method: "POST" }),
   stop: () => request<{ ok: boolean }>("/api/stop", { method: "POST" }),
-  checkReplier: () => request<{ ok: boolean; dm?: number; comment?: number; skipped?: string }>("/api/replier/check", { method: "POST" }),
+  checkReplier: () => request<{ ok: boolean; dm?: number; comment?: number; skipped?: string; queued?: boolean; detail?: string }>("/api/replier/check", { method: "POST" }),
   chatSummary: () => request<ChatSummary>("/api/chat/summary"),
   chatConversations: (refresh = false) =>
     request<ChatConversationsResponse>(`/api/chat/conversations?refresh=${refresh ? 1 : 0}`),
@@ -82,6 +101,79 @@ export const api = {
     }),
   snapshot: () => request<{ url: string; html: string; screenshot: string }>("/api/browser/snapshot", { method: "POST" }),
   closeBrowser: () => request<{ ok: boolean }>("/api/browser/close", { method: "POST" }),
+  analyticsOverview: () => request<AnalyticsOverview>("/api/analytics/overview"),
+  analyticsRefresh: (detail = false, limit = 30) =>
+    request<{ ok: boolean; works?: number; followers?: number; [key: string]: unknown }>("/api/analytics/refresh", {
+      method: "POST",
+      body: JSON.stringify({ detail, limit }),
+    }),
+  workHistory: (awemeId: string) =>
+    request<{ ok: boolean; items: Array<Record<string, unknown>> }>(`/api/analytics/works/${awemeId}/history`),
+  contentPlans: (status = "") => {
+    const q = new URLSearchParams();
+    if (status) q.set("status", status);
+    return request<{ ok: boolean; items: ContentPlan[] }>(`/api/content/plans?${q.toString()}`);
+  },
+  contentGenerate: (body: { brief: string; pillar?: string; plan_date?: string; slot?: string }) =>
+    request<{ ok: boolean; plan: ContentPlan }>("/api/content/generate", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  contentUpdate: (id: number, body: Partial<ContentPlan>) =>
+    request<{ ok: boolean; plan: ContentPlan }>(`/api/content/plans/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  contentCover: (id: number) =>
+    request<{ ok: boolean; plan: ContentPlan; cover_url: string }>(`/api/content/plans/${id}/cover`, { method: "POST" }),
+  contentApprove: (id: number) =>
+    request<{ ok: boolean; plan: ContentPlan }>(`/api/content/plans/${id}/approve`, { method: "POST" }),
+  contentReject: (id: number, reason = "") =>
+    request<{ ok: boolean; plan: ContentPlan }>(`/api/content/plans/${id}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
+  contentPublish: (id: number, confirm = false) =>
+    request<{ ok?: boolean; status: string; detail?: string; screenshot?: string; compliance?: unknown }>(
+      `/api/content/plans/${id}/publish`,
+      { method: "POST", body: JSON.stringify({ confirm }) },
+    ),
+  contentUpload: (id: number, kind: "video" | "cover", file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return requestForm<{ ok: boolean; plan: ContentPlan; path: string; url: string }>(
+      `/api/content/plans/${id}/upload?kind=${kind}`,
+      form,
+    );
+  },
+  contentCreatorOpen: () =>
+    request<{ ok: boolean; url: string; title: string; screenshot: string }>("/api/content/creator/open", {
+      method: "POST",
+    }),
+  contentCreatorShow: () =>
+    request<{ ok: boolean; url: string; title: string; screenshot: string; kept_open: boolean; visible: boolean }>(
+      "/api/content/creator/show",
+      { method: "POST" },
+    ),
+  crmContacts: (q = "", stage = "", tag = "") => {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (stage) params.set("stage", stage);
+    if (tag) params.set("tag", tag);
+    return request<CrmContactsResponse>(`/api/crm/contacts?${params.toString()}`);
+  },
+  crmContact: (key: string) =>
+    request<{ ok: boolean; contact: Contact }>(`/api/crm/contacts/${encodeURIComponent(key)}`),
+  crmUpdate: (key: string, body: { tags?: string[]; stage?: string; note?: string; score?: number }) =>
+    request<{ ok: boolean; contact: Contact }>(`/api/crm/contacts/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  crmAnalyze: (key: string) =>
+    request<{ ok: boolean; contact: Contact; usage?: Record<string, number> }>(
+      `/api/crm/contacts/${encodeURIComponent(key)}/analyze`,
+      { method: "POST" },
+    ),
   actions: (page: number, size: number, kind: string, status: string) => {
     const q = new URLSearchParams({ page: String(page), size: String(size) });
     if (kind) q.set("kind", kind);
@@ -118,6 +210,14 @@ export function statusLabel(status: string): string {
       skipped: "已跳过",
       dry_run: "预演",
       draft: "草稿",
+      idea: "想法",
+      review: "待审核",
+      needs_review: "待修改",
+      approved: "已通过",
+      rejected: "已驳回",
+      publishing: "发布中",
+      published: "已发布",
+      ready: "可发布",
     }[status] || status
   );
 }
