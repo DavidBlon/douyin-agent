@@ -423,6 +423,21 @@ def reply_exists(
     return (datetime.now() - replied_at).total_seconds() <= max_age_seconds
 
 
+def comment_reply_exists(incoming: str, *, max_age_seconds: int | None = None) -> bool:
+    sql = "SELECT created_at FROM replies WHERE kind='reply_comment' AND incoming=? ORDER BY id DESC LIMIT 1"
+    with _LOCK, db() as conn:
+        row = conn.execute(sql, (incoming.strip(),)).fetchone()
+    if row is None:
+        return False
+    if max_age_seconds is None:
+        return True
+    try:
+        replied_at = datetime.fromisoformat(str(row["created_at"]))
+    except ValueError:
+        return True
+    return (datetime.now() - replied_at).total_seconds() <= max_age_seconds
+
+
 def add_reply(
     *,
     kind: str,

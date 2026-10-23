@@ -44,7 +44,7 @@ class ContentPlanner:
     def status(self) -> dict[str, Any]:
         settings = db.load_settings()
         return {
-            "enabled": bool(settings.auto_operate and settings.auto_content),
+            "enabled": bool(settings.auto_content),
             "running": self.running,
             "busy": self._lock.locked(),
             "last_check": self.last_check,
@@ -83,7 +83,7 @@ class ContentPlanner:
 
     async def tick(self) -> dict[str, Any]:
         settings = db.load_settings()
-        if not settings.auto_operate or not settings.auto_content:
+        if not settings.auto_content:
             return {"ok": True, "skipped": "auto_disabled"}
         if self._lock.locked():
             return {"ok": True, "skipped": "busy"}

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import time
 import traceback
+from datetime import datetime
 from typing import Any
 
 from playwright.async_api import Page
 
-from . import chat, crm, db, policy
+from . import chat, creator_comments, crm, db, policy
 from .agent import AgentRunner
 from .browser import ActionError, BrowserManager, LoginRequired, RiskControl
 from .config import AgentSettings, load_api_key
@@ -95,6 +97,8 @@ class AutoReplier:
         self._wake = asyncio.Event()
         self._manual_until = 0.0
         self._quiet_until = 0.0
+        self._next_comment_check = 0.0
+        self._failed_comments: dict[tuple[str, str], float] = {}
 
     @property
     def running(self) -> bool:
@@ -225,12 +229,13 @@ class AutoReplier:
             if reader is not None:
                 badges = await reader(self.browser.page)
             dm_needed = settings.auto_reply_dms and (badges.get("im") != 0 or badges.get("notice") == 1)
-            comment_needed = settings.auto_reply_comments and badges.get("notice") != 0
+            comment_due = settings.auto_reply_comments and time.monotonic() >= self._next_comment_check
+            comment_needed = settings.auto_reply_comments and (badges.get("notice") == 1 or comment_due)
             self.runner.reply_pending = bool(dm_needed or comment_needed)
             if not dm_needed and not comment_needed:
                 self._quiet_until = 0.0
                 return {"ok": True, "skipped": "no_badge"}
-            if time.monotonic() < self._quiet_until:
+            if time.monotonic() < self._quiet_until and not comment_needed:
                 self.runner.reply_pending = False
                 return {"ok": True, "skipped": "quiet"}
         if self.busy:
@@ -276,10 +281,13 @@ class AutoReplier:
                         await page.wait_for_timeout(300)
                     except Exception:
                         pass
-                    comment_done = await self._notice_comments(page, settings)
+                    comment_done = await creator_comments.run(self.browser, settings)
 
                 self.last_result = {"dm": dm_done, "comment": comment_done}
-                if not manual and dm_done == 0 and comment_done == 0:
+                if comment_needed:
+                    # 不依赖红点是否消失：固定 5 分钟查一次通知，红点只作为提前触发。
+                    self._next_comment_check = time.monotonic() + 300
+                if not manual and dm_done == 0 and comment_done == 0 and not comment_needed:
                     self._quiet_until = time.monotonic() + 45
                 await bus.emit(
                     "reply_cycle",
@@ -744,15 +752,38 @@ class AutoReplier:
             self._last_skip_signature = ()
         return handled
 
+    @staticmethod
+    def _recent_notice(text: str, minutes: int = 180) -> bool:
+        if "刚刚" in text:
+            return True
+        match = re.search(r"(\d{1,2}):(\d{2})\s*$", text)
+        if not match:
+            return False
+        now = datetime.now()
+        try:
+            target = now.replace(hour=int(match.group(1)), minute=int(match.group(2)), second=0, microsecond=0)
+        except ValueError:
+            return False
+        return 0 <= (now - target).total_seconds() <= minutes * 60
+
     async def _notice_comments(self, page: Page, settings: AgentSettings) -> int:
         rows = await self.browser.read_notifications(page, "评论")
+        print(f"[comments] rows={len(rows)}", flush=True)
+        for item in rows[:8]:
+            text = str(item.get("text") or "")
+            print(
+                f"[comments] kind={item.get('kind')} recent={self._recent_notice(text)} "
+                f"comment={str(item.get('comment') or '')[:40]!r} text={text[:110]!r}",
+                flush=True,
+            )
         actionable = [
             row
             for row in rows
             if row.get("kind") == "comment"
             and str(row.get("comment") or "").strip()
-            and "评论了你的作品" in str(row.get("text") or "")
+            and ("评论了你的作品" in str(row.get("text") or "") or "回复了你的评论" in str(row.get("text") or ""))
             and len(str(row.get("text") or "")) <= 400
+            and self._recent_notice(str(row.get("text") or ""))
         ]
         if not actionable:
             return 0
@@ -793,7 +824,7 @@ class AutoReplier:
                 )
             return out
 
-        works = await load_works()
+        works: list[dict[str, str]] = []
         decider = DeepSeekDecider(settings)
         handled = 0
         for row in actionable[:2]:
@@ -802,20 +833,44 @@ class AutoReplier:
             notification = str(row.get("text") or "").strip()
             if not name or not comment:
                 continue
-            thumb = str(row.get("thumb") or "").split("?")[0]
-            target = next((work for work in works if thumb and work.get("cover") == thumb), None)
-            if target is None and len(works) == 1:
-                target = works[0]
-            if target is None:
-                await bus.emit(
-                    "reply",
-                    f"评论跳过：{name}（找不到对应作品）",
-                    {"contact": name, "comment": comment[:120]},
-                    level="warn",
-                )
+            target = None
+            work_url = ""
+            via_notification = False
+            if "回复了你的评论" in notification:
+                via_notification = True
+                opened = await self.browser.click_notification(page, name, comment)
+                modal_id = str(opened.get("modal_id") or "")
+                if not modal_id:
+                    await bus.emit(
+                        "reply",
+                        f"评论跳过：{name}（通知条目没有打开视频）",
+                        {"contact": name, "comment": comment[:120]},
+                        level="warn",
+                    )
+                    continue
+                work_url = f"https://www.douyin.com/note/{modal_id}"
+                target = {"url": work_url, "title": "", "cover": ""}
+            else:
+                await self.browser.consume_notification(page, name, comment)
+                if not works:
+                    works = await load_works()
+                thumb = str(row.get("thumb") or "").split("?")[0]
+                target = next((work for work in works if thumb and work.get("cover") == thumb), None)
+                if target is None and len(works) == 1:
+                    target = works[0]
+                if target is None:
+                    await bus.emit(
+                        "reply",
+                        f"评论跳过：{name}（找不到对应作品）",
+                        {"contact": name, "comment": comment[:120]},
+                        level="warn",
+                    )
+                    continue
+                work_url = target["url"]
+            if db.reply_exists("reply_comment", work_url, comment, max_age_seconds=180):
                 continue
-            work_url = target["url"]
-            if db.reply_exists("reply_comment", work_url, comment):
+            fail_at = self._failed_comments.get((work_url, comment))
+            if fail_at and time.monotonic() - fail_at < 1800:
                 continue
             await bus.emit(
                 "reply",
@@ -912,8 +967,15 @@ class AutoReplier:
                     {"contact": name, "comment": comment[:120], "reply": reply, "dry_run": True},
                 )
                 continue
-            result = await self.browser.reply_comment_on_work(work_url, name, comment, reply)
+            result = await self.browser.reply_comment_on_work(
+                work_url,
+                name,
+                "" if via_notification else comment,
+                f"@{name} {reply}" if via_notification else reply,
+            )
             status = str(result.get("status") or "failed")
+            if status == "failed":
+                self._failed_comments[(work_url, comment)] = time.monotonic()
             if status in ("sent", "uncertain"):
                 db.add_reply(
                     kind="reply_comment",

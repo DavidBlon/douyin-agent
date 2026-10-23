@@ -11,7 +11,8 @@ from app.config import AgentSettings
 
 
 class FakeBrowser:
-    pass
+    async def nav_badges(self, page=None):
+        return {"im": 0, "notice": 0, "avatar": 0}
 
 
 def make_runner():
@@ -145,3 +146,42 @@ async def test_ensure_current_video_reopens_matching_id(temp_db):
 
     assert await agent._ensure_current_video(page, "222") is True
     assert page.url.endswith("/video/222")
+
+
+@pytest.mark.asyncio
+async def test_hourly_auto_share_selected_without_badge(temp_db, monkeypatch):
+    db.save_settings(
+        AgentSettings(auto_share=True, auto_operate=True, share_target="氛围感奶蛙", dry_run=True)
+    )
+    runner = make_runner()
+    await runner.exclusive.acquire()
+    agent = sharer_mod.AutoSharer(runner)
+    agent._last_auto = 0.0
+    monkeypatch.setattr(sharer_mod.AutoSharer, "_due_slot", staticmethod(lambda s: ""))
+
+    result = await agent.check_once()
+
+    assert result["skipped"] == "run_in_progress"
+    assert agent._last_auto > 0
+    assert agent.pending_slot == ""
+    runner.exclusive.release()
+
+
+@pytest.mark.asyncio
+async def test_hourly_auto_share_waits_for_red_dot(temp_db, monkeypatch):
+    db.save_settings(
+        AgentSettings(auto_share=True, auto_operate=True, share_target="氛围感奶蛙", dry_run=True)
+    )
+    runner = make_runner()
+    agent = sharer_mod.AutoSharer(runner)
+    agent._last_auto = 0.0
+    monkeypatch.setattr(sharer_mod.AutoSharer, "_due_slot", staticmethod(lambda s: ""))
+
+    async def busy_badge(page=None):
+        return {"im": 1, "notice": 0, "avatar": 0}
+
+    monkeypatch.setattr(runner.browser, "nav_badges", busy_badge)
+    result = await agent.check_once()
+
+    assert result["skipped"] == "badge_wait"
+    assert agent.pending_slot == ""

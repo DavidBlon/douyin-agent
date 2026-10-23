@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 from datetime import datetime
 from typing import Any
 
@@ -507,6 +508,7 @@ class AutoSharer:
         self.last_result: dict[str, Any] = {}
         self.pending_slot = ""
         self._pending_notified = ""
+        self._last_auto = time.monotonic()
 
     @property
     def running(self) -> bool:
@@ -632,6 +634,7 @@ class AutoSharer:
         if not target:
             raise ActionError("还没有设置分享接收账号")
         slot = "manual" if force else self._due_slot(settings)
+        auto_mode = False
         if not force and not slot and self.pending_slot:
             if db.share_ran(db.today_key(), self.pending_slot):
                 self.pending_slot = ""
@@ -639,22 +642,33 @@ class AutoSharer:
                 self.runner.share_pending = False
                 return {"ok": True, "skipped": "already_ran"}
             slot = self.pending_slot
+        if not force and not slot and settings.auto_share and settings.auto_operate:
+            if time.monotonic() - self._last_auto >= 3600:
+                badges = await self.browser.nav_badges(getattr(self.browser, "page", None))
+                if badges.get("im") == 1 or badges.get("notice") == 1:
+                    return {"ok": True, "skipped": "badge_wait"}
+                self._last_auto = time.monotonic()
+                slot = "auto"
+                auto_mode = True
         if not slot:
             return {"ok": True, "skipped": "not_due"}
-        if not force and db.share_ran(db.today_key(), slot):
+        if not force and slot != "auto" and db.share_ran(db.today_key(), slot):
             self.pending_slot = ""
             self._pending_notified = ""
             return {"ok": True, "skipped": "already_ran"}
         if self.busy:
             return {"ok": True, "skipped": "busy"}
         if self.runner.running or self.runner.exclusive.locked():
-            if not force:
+            if not force and slot != "auto":
                 await self._hold_pending(slot, "浏览器正被自动回复/刷流占用")
             return {"ok": True, "skipped": "run_in_progress"}
         if getattr(self.runner, "run_pending", False):
-            if not force:
+            if not force and slot != "auto":
                 await self._hold_pending(slot, "有一轮正在排队")
             return {"ok": True, "skipped": "run_pending"}
+        if auto_mode:
+            settings = settings.model_copy(update={"share_max_per_run": 1})
+            self.runner.share_pending = True
         if not load_api_key():
             raise LLMError("还没有配置 API Key，定时分享无法运行")
 
@@ -681,19 +695,25 @@ class AutoSharer:
                 self.last_error = ""
                 result = await self._scan_and_share(page, settings, target)
                 self.last_result = result
-                if not force:
+                if not force and slot != "auto":
                     db.mark_share_run(db.today_key(), slot)
                 self.pending_slot = ""
                 self._pending_notified = ""
                 self.runner.share_pending = False
                 await bus.emit(
                     "share_cycle",
-                    f"定时分享检查完成：分享 {result.get('shared', 0)} 条",
+                    (
+                        f"每小时分享完成：分享 {result.get('shared', 0)} 条"
+                        if auto_mode
+                        else f"定时分享检查完成：分享 {result.get('shared', 0)} 条"
+                    ),
                     {**result, "target": target, "slot": slot},
                 )
                 return {"ok": True, **result}
         finally:
             self.busy = False
+            if auto_mode:
+                self.runner.share_pending = False
             if page is not None and not page.is_closed():
                 try:
                     await page.close()

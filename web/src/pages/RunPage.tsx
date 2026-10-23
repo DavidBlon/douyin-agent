@@ -463,7 +463,7 @@ function FansPanel({
       setLoading(true);
       setError("");
       try {
-        if (!fansInflight) fansInflight = api.fans();
+        if (!fansInflight) fansInflight = api.fans(force);
         const next = await fansInflight;
         fansInflight = null;
         fansCache = { at: Date.now(), data: next };
@@ -565,7 +565,7 @@ function FansPanel({
         </div>
       ) : null}
 
-      {loggedIn && error ? (
+      {loggedIn && error && !data ? (
         <div className="fans-empty">
           <p className="fans-error">{error}</p>
           <button className="btn btn-ghost" onClick={() => void load(true)} type="button">重试</button>
@@ -752,7 +752,7 @@ export function RunPage({
             <div className={`auto-row ${settings?.auto_operate ? "on" : ""}`}>
               <div>
                 <strong>全自动运营</strong>
-                <span>{settings?.auto_operate ? "自动选题 · 成片 · 发布 · 刷流互动" : "自动内容与发布已暂停"}</span>
+                <span>{settings?.auto_operate ? "自动刷流 · 点赞 · 评论 · 分享互动" : "刷流互动已暂停；内容开关独立"}</span>
               </div>
               <Toggle
                 checked={Boolean(settings?.auto_operate)}

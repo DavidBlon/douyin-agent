@@ -55,7 +55,7 @@ class ContentPublisher:
     def status(self) -> dict[str, Any]:
         settings = db.load_settings()
         return {
-            "enabled": bool(settings.auto_operate and settings.auto_publish),
+            "enabled": bool(settings.auto_publish),
             "running": self.running,
             "busy": self.busy or self._lock.locked(),
             "last_error": self.last_error,
@@ -123,7 +123,7 @@ class ContentPublisher:
         while not self._stop.is_set():
             try:
                 settings = db.load_settings()
-                enabled = settings.auto_operate and settings.auto_publish
+                enabled = settings.auto_publish
                 if enabled and not self._lock.locked():
                     due = db.due_content_plans()
                     for plan in due[:2]:

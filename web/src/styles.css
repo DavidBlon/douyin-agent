@@ -296,7 +296,7 @@ input, textarea, [contenteditable="true"] {
 /* run grid */
 .run-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.75fr); gap: 16px; align-items: stretch; }
 .run-main, .run-side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.run-main .decision-panel { flex: 1; }
+.run-main .decision-panel { flex: 0 0 auto; }
 .video-panel { min-height: 480px; flex: 0 0 auto; }
 .video-cover { position: relative; margin: 14px 18px 0; height: clamp(240px, 34vh, 420px); border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: #0a0d11; }
 .cover-backdrop { position: absolute; inset: -24px; z-index: 0; background-size: cover; background-position: center; filter: blur(22px) brightness(0.38); transform: scale(1.06); pointer-events: none; }
@@ -327,7 +327,7 @@ input, textarea, [contenteditable="true"] {
 .comment-peek { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line); }
 .comment-peek p { margin-top: 4px; padding-left: 8px; border-left: 1px solid rgba(255, 255, 255, 0.12); color: var(--muted); font-size: 11px; line-height: 1.5; }
 .comment-peek p + p { margin-top: 3px; }
-.decision-panel { min-height: 260px; }
+.decision-panel { min-height: 0; }
 .decision-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 18px; }
 .decision-empty .empty { min-height: 0; padding: 12px 24px; }
 .decision-hints { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 8px; }

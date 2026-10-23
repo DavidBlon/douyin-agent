@@ -88,7 +88,7 @@ export const api = {
   checkSharer: () => request<{ ok: boolean; shared?: number; scanned?: number; skipped?: string }>("/api/share/check", { method: "POST" }),
   openBrowser: () => request<{ started: boolean; logged_in: boolean; headless?: boolean; url?: string; last_error?: string }>("/api/browser/open", { method: "POST" }),
   hideBrowser: () => request<{ started: boolean; logged_in: boolean }>("/api/browser/hide", { method: "POST" }),
-  fans: () => request<FansResponse>("/api/fans"),
+  fans: (refresh = false) => request<FansResponse>(`/api/fans${refresh ? "?refresh=1" : ""}`),
   followFan: (name: string, profile_url: string) =>
     request<FollowFanResponse>("/api/fans/follow", {
       method: "POST",

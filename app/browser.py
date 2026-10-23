@@ -520,29 +520,53 @@ NAV_BADGES_JS = r"""
     const small = rp && rp.width * rp.height <= Math.max(1, re.width * re.height) * 4;
     im = hasBadge(small ? parent : imEntry) ? 1 : 0;
     imDebug = `${imEntry.className || ''}|${(imEntry.outerHTML || '').slice(0, 700)}`;
-  }
-  const header = document.querySelector('#douyin-header') || document.querySelector('header');
-  let notice = -1;
-  const debug = [];
-  if (header) {
-    let found = false;
-    for (const node of header.querySelectorAll('*')) {
-      if (imEntry && (imEntry === node || imEntry.contains(node) || node.contains(imEntry))) continue;
-      if (isBadge(node)) {
-        found = true;
-        if (debug.length < 8) {
-          const r = node.getBoundingClientRect();
-          debug.push({
-            tag: node.tagName,
-            cls: typeof node.className === 'string' ? node.className.slice(0, 60) : '',
-            w: Math.round(r.width),
-            h: Math.round(r.height),
-            text: (node.innerText || '').trim().slice(0, 12),
-          });
-        }
-      }
+  }  const entryBadge = el => {
+    if (!el) return -1;
+    let node = el;
+    for (let i = 0; i < 3 && node; i++, node = node.parentElement) {
+      const r = node.getBoundingClientRect();
+      if (r.width > 180 || r.height > 120) break;
+      if (hasBadge(node)) return 1;
     }
-    notice = found ? 1 : 0;
+    return 0;
+  };
+  const findByLabel = label => {
+    const matches = [...document.querySelectorAll('a,button,div,span,li')]
+      .filter(el => visible(el) && (el.innerText || '').trim() === label)
+      .sort((a, b) => {
+        const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+        return ra.width * ra.height - rb.width * rb.height;
+      });
+    if (matches[0]) return matches[0];
+    return document.querySelector(`[aria-label*="${label}"],[title*="${label}"]`);
+  };
+  const header = document.querySelector('#douyin-header') || document.querySelector('header');
+  const noticeEntry = findByLabel('通知');
+  const imLabelEntry = findByLabel('消息');
+  const imLabelBadge = entryBadge(imLabelEntry);
+  if (imLabelBadge === 1) im = 1;
+  else if (im === -1) im = imLabelBadge;
+  let notice = entryBadge(noticeEntry);
+  const debug = [];
+  if (noticeEntry) {
+    const r = noticeEntry.getBoundingClientRect();
+    debug.push({
+      tag: 'NOTICE_ENTRY',
+      cls: typeof noticeEntry.className === 'string' ? noticeEntry.className.slice(0, 60) : '',
+      w: Math.round(r.width),
+      h: Math.round(r.height),
+      text: (noticeEntry.innerText || '').trim().slice(0, 12),
+    });
+  }
+  if (imLabelEntry) {
+    const r = imLabelEntry.getBoundingClientRect();
+    debug.push({
+      tag: 'MSG_ENTRY',
+      cls: typeof imLabelEntry.className === 'string' ? imLabelEntry.className.slice(0, 60) : '',
+      w: Math.round(r.width),
+      h: Math.round(r.height),
+      text: (imLabelEntry.innerText || '').trim().slice(0, 12),
+    });
   }
   return { im, notice, avatar: -1, debug, im_debug: imDebug };
 }
@@ -743,7 +767,7 @@ NOTIFICATION_ROWS_JS = r"""
       const r = img.getBoundingClientRect();
       return r.width >= 40 && r.height >= 40;
     });
-    const kind = text.includes('评论了你的作品')
+    const kind = (text.includes('评论了你的作品') || text.includes('回复了你的评论') || text.includes('评论中提到了你'))
       ? 'comment'
       : text.includes('关注了你')
         ? 'follow'
@@ -795,6 +819,7 @@ class BrowserManager:
         self.page: Page | None = None
         self.activity_page: Page | None = None
         self.activity_at = 0.0
+        self._fan_ctx: BrowserContext | None = None
         self.last_error = ""
         self._chrome_pids: set[int] = set()
         self._watch_task: asyncio.Task | None = None
@@ -934,6 +959,12 @@ class BrowserManager:
         self._stay_visible = False
         self._chrome_pids.clear()
         try:
+            if self._fan_ctx:
+                await self._fan_ctx.close()
+        except Exception:
+            pass
+        self._fan_ctx = None
+        try:
             if self.context:
                 await self.context.close()
         except Exception:
@@ -962,6 +993,60 @@ class BrowserManager:
         if track:
             self.activity_page = page
             self.activity_at = time.monotonic()
+        if self.settings.silent_browser and not self._stay_visible:
+            if not self._chrome_pids:
+                await self._window_mode("hide")
+            else:
+                await asyncio.sleep(0.15)
+                self._hide_windows_now()
+        return page
+
+    async def _fan_context(self) -> BrowserContext:
+        """粉丝/回关专用的独立上下文，共享登录 Cookie，不和刷流页面抢状态。"""
+        if not self.context:
+            raise BrowserError("浏览器上下文不可用")
+        if self._fan_ctx is not None:
+            try:
+                if self._fan_ctx.pages is not None:
+                    return self._fan_ctx
+            except Exception:
+                self._fan_ctx = None
+        browser = getattr(self.context, "browser", None)
+        if browser is None:
+            return self.context
+        storage = await self.context.storage_state()
+        kwargs: dict[str, Any] = {
+            "storage_state": storage,
+            "locale": "zh-CN",
+            "timezone_id": "Asia/Shanghai",
+            "viewport": {"width": 1440, "height": 900},
+        }
+        try:
+            first = self.context.pages[0] if self.context.pages else None
+            if first is not None:
+                ua = await first.evaluate("() => navigator.userAgent")
+                if ua:
+                    kwargs["user_agent"] = ua
+        except Exception:
+            pass
+        ctx = await browser.new_context(**kwargs)
+        ctx.set_default_timeout(15000)
+        self._fan_ctx = ctx
+        return ctx
+
+    async def reset_fan_context(self) -> None:
+        ctx, self._fan_ctx = self._fan_ctx, None
+        if ctx is None:
+            return
+        try:
+            await ctx.close()
+        except Exception:
+            pass
+
+    async def _new_fan_page(self) -> Page:
+        ctx = await self._fan_context()
+        page = await ctx.new_page()
+        page.set_default_timeout(15000)
         if self.settings.silent_browser and not self._stay_visible:
             if not self._chrome_pids:
                 await self._window_mode("hide")
@@ -1510,81 +1595,279 @@ class BrowserManager:
         author: str,
         comment: str,
         reply_text: str,
+        page: Page | None = None,
     ) -> dict[str, Any]:
-        page = await self.new_page()
+        own_page = page is None
+        if page is None:
+            page = await self.new_page()
         page.set_default_timeout(20000)
         shot_name = f"reply_comment_{_now_tag()}.png"
         shot_path = self._shots / shot_name
         try:
-            await page.goto(work_url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(3000)
-            opened = False
-            for sel in (
-                '[data-e2e="feed-comment-icon"]',
-                '[data-e2e="comment-icon"]',
-                '[data-e2e="video-comment"]',
-            ):
-                loc = page.locator(sel)
-                for i in range(await loc.count()):
+            if own_page:
+                await page.goto(work_url, wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(3000)
+            else:
+                await page.wait_for_timeout(2200)
+            panel_open = False
+            try:
+                panel_open = bool(
+                    await page.evaluate(
+                        """() => !!document.querySelector('[data-e2e="comment-item"], .public-DraftEditor-content, #comment-input-container, .comment-input-container')"""
+                    )
+                )
+            except Exception:
+                panel_open = False
+            if not panel_open:
+                tab_box = None
+                try:
+                    tab_box = await page.evaluate(
+                        """() => {
+                            const clean = s => (s || '').replace(/\\s+/g, ' ').trim();
+                            const visible = el => {
+                                const r = el.getBoundingClientRect();
+                                const s = getComputedStyle(el);
+                                return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+                            };
+                            const related = [...document.querySelectorAll('div,span')].find(el => {
+                                return visible(el) && clean(el.innerText) === '相关推荐' && el.getBoundingClientRect().left > innerWidth * 0.5;
+                            });
+                            const anchorY = related ? (related.getBoundingClientRect().top + related.getBoundingClientRect().height / 2) : null;
+                            const tabs = [...document.querySelectorAll('div,span')].filter(el => {
+                                const t = clean(el.innerText);
+                                const r = el.getBoundingClientRect();
+                                if (!visible(el) || !/^评论(\(\d+\))?$/.test(t) || r.left < innerWidth * 0.5) return false;
+                                if (anchorY === null) return true;
+                                return Math.abs((r.top + r.height / 2) - anchorY) < 18;
+                            }).sort((a, b) => {
+                                const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+                                return ra.width * ra.height - rb.width * rb.height;
+                            });
+                            if (!tabs[0]) return null;
+                            const r = tabs[0].getBoundingClientRect();
+                            return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+                        }"""
+                    )
+                except Exception:
+                    tab_box = None
+                if tab_box:
                     try:
-                        if not await loc.nth(i).is_visible():
-                            continue
-                        box = await loc.nth(i).bounding_box()
-                        if not box:
-                            continue
                         await page.evaluate(
                             "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = 'none'; }"
                         )
                         try:
                             await page.mouse.click(
-                                box["x"] + box["width"] / 2,
-                                box["y"] + box["height"] / 2,
+                                tab_box["x"] + tab_box["w"] / 2,
+                                tab_box["y"] + tab_box["h"] / 2,
                             )
                         finally:
                             await page.evaluate(
                                 "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = ''; }"
                             )
-                        opened = True
-                        break
+                        await page.wait_for_timeout(1600)
+                        panel_open = bool(
+                            await page.evaluate(
+                                """() => {
+                        const text = document.body ? document.body.innerText : '';
+                        return !!document.querySelector('[data-e2e="comment-item"], .public-DraftEditor-content, #comment-input-container, .comment-input-container, [data-e2e="comment-list"]')
+                            || text.includes('全部评论') || text.includes('留下你的精彩评论');
+                    }"""
+                            )
+                        )
                     except Exception:
-                        continue
-                if opened:
-                    break
+                        panel_open = False
+                if not panel_open:
+                    try:
+                        parent_clicked = bool(
+                            await page.evaluate(
+                                """() => {
+                                    const clean = s => (s || '').replace(/\\s+/g, ' ').trim();
+                                    const visible = el => {
+                                        const r = el.getBoundingClientRect();
+                                        const s = getComputedStyle(el);
+                                        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+                                    };
+                                    const related = [...document.querySelectorAll('div,span')].find(el => visible(el) && clean(el.innerText) === '相关推荐' && el.getBoundingClientRect().left > innerWidth * 0.5);
+                                    const anchorY = related ? (related.getBoundingClientRect().top + related.getBoundingClientRect().height / 2) : null;
+                                    const tab = [...document.querySelectorAll('div,span')].find(el => {
+                                        const t = clean(el.innerText);
+                                        const r = el.getBoundingClientRect();
+                                        if (!visible(el) || !/^评论(\\(\\d+\\))?$/.test(t) || r.left < innerWidth * 0.5) return false;
+                                        return anchorY === null || Math.abs((r.top + r.height / 2) - anchorY) < 18;
+                                    });
+                                    if (!tab) return false;
+                                    const target = tab.parentElement || tab;
+                                    target.click();
+                                    return true;
+                                }"""
+                            )
+                        )
+                        if parent_clicked:
+                            await page.wait_for_timeout(1600)
+                            panel_open = bool(
+                                await page.evaluate(
+                                    """() => {
+                                        const text = document.body ? document.body.innerText : '';
+                                        return !!document.querySelector('[data-e2e="comment-item"], .public-DraftEditor-content, #comment-input-container, .comment-input-container, [data-e2e="comment-list"]')
+                                            || text.includes('全部评论') || text.includes('留下你的精彩评论');
+                                    }"""
+                                )
+                            )
+                    except Exception:
+                        panel_open = False
+                if not panel_open:
+                    try:
+                        tab = page.get_by_text(re.compile(r"^评论\(\d+\)$")).first
+                        if await tab.count():
+                            await tab.click(timeout=5000)
+                            await page.wait_for_timeout(1600)
+                            panel_open = bool(
+                                await page.evaluate(
+                                    """() => {
+                        const text = document.body ? document.body.innerText : '';
+                        return !!document.querySelector('[data-e2e="comment-item"], .public-DraftEditor-content, #comment-input-container, .comment-input-container, [data-e2e="comment-list"]')
+                            || text.includes('全部评论') || text.includes('留下你的精彩评论');
+                    }"""
+                                )
+                            )
+                    except Exception:
+                        panel_open = False
+                if not panel_open:
+                    # 兜底：视频右侧操作栏的评论气泡（相对位置）
+                    try:
+                        size = await page.evaluate("() => ({ w: innerWidth, h: innerHeight })")
+                        await page.mouse.click(size["w"] - 421, size["h"] * 0.633)
+                        await page.wait_for_timeout(1600)
+                        panel_open = bool(
+                            await page.evaluate(
+                                """() => {
+                        const text = document.body ? document.body.innerText : '';
+                        return !!document.querySelector('[data-e2e="comment-item"], .public-DraftEditor-content, #comment-input-container, .comment-input-container, [data-e2e="comment-list"]')
+                            || text.includes('全部评论') || text.includes('留下你的精彩评论');
+                    }"""
+                            )
+                        )
+                    except Exception:
+                        panel_open = False
+            if not panel_open:
+                for sel in (
+                    '[data-e2e="feed-comment-icon"]',
+                    '[data-e2e="comment-icon"]',
+                    '[data-e2e="video-comment"]',
+                ):
+                    loc = page.locator(sel)
+                    for i in range(await loc.count()):
+                        try:
+                            if not await loc.nth(i).is_visible():
+                                continue
+                            box = await loc.nth(i).bounding_box()
+                            if not box:
+                                continue
+                            await page.evaluate(
+                                "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = 'none'; }"
+                            )
+                            try:
+                                await page.mouse.click(
+                                    box["x"] + box["width"] / 2,
+                                    box["y"] + box["height"] / 2,
+                                )
+                            finally:
+                                await page.evaluate(
+                                    "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = ''; }"
+                                )
+                            opened = True
+                            break
+                        except Exception:
+                            continue
+                    if opened:
+                        break
+            else:
+                opened = True
             if not opened:
                 return {"status": "failed", "detail": "没有打开评论面板"}
             await page.wait_for_timeout(1600)
 
+            # 展开“展开N条回复”，让嵌套回复进入 DOM 再定位。
+            for _ in range(4):
+                expanded = await page.evaluate(
+                    """() => {
+                        const clean = s => (s || '').replace(/\\s+/g, ' ').trim();
+                        const candidates = [...document.querySelectorAll('span,div')].filter(el => {
+                            const t = clean(el.innerText);
+                            const r = el.getBoundingClientRect();
+                            return r.width > 0 && r.height > 0 && t.startsWith('展开') && t.includes('回复');
+                        });
+                        const el = candidates[0];
+                        if (!el) return false;
+                        el.click();
+                        return true;
+                    }"""
+                )
+                if not expanded:
+                    break
+                await page.wait_for_timeout(650)
+
             target = await page.evaluate(
                 """([author, comment]) => {
-                  const controls = [...document.querySelectorAll('span, div')].filter(el => {
-                    if ((el.innerText || '').trim() !== '回复') return false;
+                  const clean = s => (s || '').replace(/\\s+/g, ' ').trim();
+                  const visible = el => {
                     const r = el.getBoundingClientRect();
-                    return r.width > 0 && r.height > 0;
+                    const s = getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+                  };
+                  const mark = el => {
+                    el.setAttribute('data-dy-agent-reply', '1');
+                    const r = el.getBoundingClientRect();
+                    return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+                  };
+                  // 先找到“评论文字”本身，再从它最近的祖先行里找回复按钮，
+                  // 这样嵌套回复不会误点到父评论的“回复”。
+                  const textNodes = [...document.querySelectorAll('span,div,p')].filter(el => {
+                    const t = clean(el.innerText);
+                    if (!t || !t.includes(comment) || !visible(el)) return false;
+                    return ![...el.children].some(c => clean(c.innerText) === t);
+                  }).sort((a, b) => {
+                    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+                    return ra.width * ra.height - rb.width * rb.height;
                   });
+                  for (const textEl of textNodes.slice(0, 3)) {
+                    let row = textEl;
+                    for (let i = 0; i < 8 && row; i++, row = row.parentElement) {
+                      const controls = [...row.querySelectorAll('span,div')].filter(el => clean(el.innerText) === '回复' && visible(el));
+                      if (controls.length) return mark(controls[controls.length - 1]);
+                      const r = row.getBoundingClientRect();
+                      if (r.width > 900) break;
+                    }
+                  }
+                  const controls = [...document.querySelectorAll('span,div')].filter(el => clean(el.innerText) === '回复' && visible(el));
                   const hit = controls.find(el => {
                     const item = el.closest('[data-e2e="comment-item"]');
                     const text = ((item && item.innerText) || '').replace(/\\s+/g, ' ');
                     return text.includes(author) && (!comment || text.includes(comment));
                   }) || controls[0];
-                  if (!hit) return null;
-                  hit.setAttribute('data-dy-agent-reply', '1');
-                  const r = hit.getBoundingClientRect();
-                  return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+                  return hit ? mark(hit) : null;
                 }""",
                 [author, comment],
             )
-            if not target:
-                return {"status": "failed", "detail": "没有找到这条评论的回复按钮"}
-            await page.evaluate(
-                "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = 'none'; }"
-            )
-            try:
-                await page.mouse.click(target["x"] + target["w"] / 2, target["y"] + target["h"] / 2)
-            finally:
+            if not comment:
+                target = None
+            if not target and comment:
+                try:
+                    await page.screenshot(path=str(shot_path))
+                except Exception:
+                    pass
+                return {"status": "failed", "detail": f"没有找到这条评论的回复按钮。截图：/media/shots/{shot_name}"}
+            if target:
                 await page.evaluate(
-                    "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = ''; }"
+                    "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = 'none'; }"
                 )
-            await page.wait_for_timeout(800)
+                try:
+                    await page.mouse.click(target["x"] + target["w"] / 2, target["y"] + target["h"] / 2)
+                finally:
+                    await page.evaluate(
+                        "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = ''; }"
+                    )
+                await page.wait_for_timeout(800)
 
             editor = None
             editors = page.locator('.public-DraftEditor-content')
@@ -1666,7 +1949,7 @@ class BrowserManager:
                 "screenshot": f"/media/shots/{shot_name}",
             }
         finally:
-            if not page.is_closed():
+            if own_page and not page.is_closed():
                 try:
                     await page.close()
                 except Exception:
@@ -1920,7 +2203,11 @@ class BrowserManager:
 
     async def _open_fans_modal(self, page: Page) -> bool:
         await page.goto("https://www.douyin.com/user/self", wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(1000)
+        try:
+            await page.wait_for_selector('[data-e2e="user-info-fans"]', state="visible", timeout=12000)
+        except Exception:
+            pass
         try:
             hits = await page.evaluate(RISK_JS)
         except Exception:
@@ -1980,7 +2267,7 @@ class BrowserManager:
             raise BrowserError("浏览器还没有启动")
         if not await self.is_logged_in():
             raise LoginRequired("浏览器还没有登录抖音")
-        page = await self.new_page()
+        page = await self._new_fan_page()
         try:
             if not await self._open_fans_modal(page):
                 raise ActionError("没有打开粉丝列表，可能页面改版了")
@@ -2047,7 +2334,7 @@ class BrowserManager:
             raise BrowserError("浏览器还没有启动")
         if not await self.is_logged_in():
             raise LoginRequired("浏览器还没有登录抖音")
-        page = await self.new_page()
+        page = await self._new_fan_page()
         try:
             if profile_url:
                 return await self._follow_via_profile(page, name, profile_url)
@@ -2133,7 +2420,7 @@ class BrowserManager:
             raise BrowserError("浏览器还没有启动")
         if not await self.is_logged_in():
             raise LoginRequired("浏览器还没有登录抖音")
-        page = await self.new_page()
+        page = await self._new_fan_page()
         try:
             await page.goto(profile_url, wait_until="domcontentloaded", timeout=45000)
             await page.wait_for_timeout(1200)
@@ -2288,6 +2575,77 @@ class BrowserManager:
         except Exception:
             pass
         return [dict(x) for x in (data or []) if isinstance(x, dict)]
+
+    async def click_notification(self, page: Page, name: str, comment: str) -> dict[str, Any]:
+        """Open the bell dropdown and click the matching comment notification row."""
+        trigger = page.locator('[data-e2e="something-button"]').filter(has_text="通知")
+        clicked = False
+        for i in range(await trigger.count()):
+            try:
+                if await trigger.nth(i).is_visible():
+                    await trigger.nth(i).click()
+                    clicked = True
+                    break
+            except Exception:
+                continue
+        if not clicked:
+            return {}
+        await page.wait_for_timeout(1100)
+        marked = await page.evaluate(
+            """([name, comment]) => {
+                const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+                const root = document.querySelector('[data-e2e="listDlgTest-container"]');
+                if (!root) return false;
+                const cards = [...root.querySelectorAll('[data-e2e="user-name-card"]')];
+                for (const card of cards) {
+                    const label = clean(card.innerText).replace(/^@/, '');
+                    if (label !== name) continue;
+                    let row = card;
+                    let text = '';
+                    for (let i = 0; i < 8 && row && row.parentElement; i++) {
+                        row = row.parentElement;
+                        text = clean(row.innerText);
+                        if (text.includes('回复') || text.includes('评论')) break;
+                        if (text.length > 600) break;
+                    }
+                    if (!text.includes(comment)) continue;
+                    if (!/回复了你的评论|评论了你的作品/.test(text)) continue;
+                    row.setAttribute('data-dy-notice-click', '1');
+                    return true;
+                }
+                return false;
+            }""",
+            [name, comment],
+        )
+        if not marked:
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return {}
+        row = page.locator('[data-dy-notice-click="1"]').first
+        try:
+            box = await row.bounding_box()
+            if not box:
+                return {}
+            await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        except Exception:
+            return {}
+        await page.wait_for_timeout(1800)
+        match = re.search(r"modal_id=(\d+)", page.url) or re.search(r"/video/(\d+)", page.url)
+        return {"url": page.url, "modal_id": match.group(1) if match else ""}
+
+    async def consume_notification(self, page: Page, name: str, comment: str) -> None:
+        """点开对应通知条目再关掉，让铃铛上的红点消失。"""
+        try:
+            await self.click_notification(page, name, comment)
+        except Exception:
+            return
+        try:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(400)
+        except Exception:
+            pass
 
     async def _find_visible(self, raw_selectors: list[str], *, prefer_last: bool = False):
         page = await self._ensure_page()

@@ -366,8 +366,6 @@ export default function App() {
             ...settings,
             auto_operate: true,
             dry_run: false,
-            auto_content: true,
-            auto_video: true,
             auto_like: true,
             auto_comment: true,
             auto_dm: true,
@@ -375,7 +373,6 @@ export default function App() {
         : {
             ...settings,
             auto_operate: false,
-            auto_content: false,
           };
       const saved = await api.saveSettings({ ...payload, has_api_key: undefined });
       setSettings(saved);
@@ -383,8 +380,8 @@ export default function App() {
       await refreshStatus();
       notify(
         next
-          ? "全自动内容与发布已开启：自动选题、成片、发布和刷流互动"
-          : "自动内容与发布已暂停；自动回复/分享不受影响",
+          ? "刷流互动已开启：自动刷视频、点赞、评论；内容生成仍由内容开关控制"
+          : "刷流互动已暂停；内容生成、自动回复和分享不受影响",
         next ? "ok" : "warn",
       );
     } catch (e) {
