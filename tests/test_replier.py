@@ -40,6 +40,23 @@ class FakeBrowser:
     async def read_chat_messages(self, page):
         return self.messages
 
+    async def read_chat_transcript(self, page):
+        rows = []
+        for index, item in enumerate(self.messages):
+            rows.append(
+                {
+                    "index": index,
+                    "top": 100 + index,
+                    "text": item.get("text") or "",
+                    "time": item.get("time") or "",
+                    "avatar": item.get("avatar") or "",
+                    "images": [],
+                    "videos": [],
+                    "is_system": False,
+                }
+            )
+        return rows
+
     async def send_chat_message(self, page, text):
         self.sent.append(text)
         return {"status": "sent", "detail": "私信已发送"}
@@ -47,6 +64,11 @@ class FakeBrowser:
 
 def make_runner(browser: FakeBrowser):
     return SimpleNamespace(browser=browser, running=False, exclusive=asyncio.Lock())
+
+
+class FakePage:
+    async def wait_for_timeout(self, ms):
+        return None
 
 
 def conv(**overrides):
@@ -79,7 +101,7 @@ async def test_replier_dm_sends_for_mutual(temp_db, monkeypatch):
         dry_run=False,
     )
     db.save_settings(settings)
-    handled = await agent._reply_dms(None, settings, mutual_rows())
+    handled = await agent._reply_dms(FakePage(), settings, mutual_rows())
     assert handled == 1
     assert browser.sent == ["在的，怎么啦？"]
     assert db.reply_exists("reply_dm", replier_mod._conversation_key(conv()), "你好")
@@ -99,7 +121,7 @@ async def test_replier_dm_dry_run_does_not_send(temp_db, monkeypatch):
         dm_reply_scope="mutual",
         dry_run=True,
     )
-    handled = await agent._reply_dms(None, settings, mutual_rows())
+    handled = await agent._reply_dms(FakePage(), settings, mutual_rows())
     assert handled == 0
     assert browser.sent == []
     actions = db.list_actions(page=1, size=10)
@@ -122,7 +144,7 @@ async def test_replier_skips_groups_and_strangers(temp_db, monkeypatch):
         dm_reply_scope="mutual",
         dry_run=False,
     )
-    handled = await agent._reply_dms(None, settings, [])
+    handled = await agent._reply_dms(FakePage(), settings, [])
     assert handled == 0
     assert browser.opened == 0
     assert browser.sent == []

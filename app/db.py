@@ -322,13 +322,25 @@ def count_dm_today(target_name: str) -> int:
     return int(row["n"])
 
 
-def reply_exists(kind: str, target_key: str, incoming: str) -> bool:
+def reply_exists(
+    kind: str,
+    target_key: str,
+    incoming: str,
+    *,
+    max_age_seconds: int | None = None,
+) -> bool:
+    sql = "SELECT created_at FROM replies WHERE kind=? AND target_key=? AND incoming=? ORDER BY id DESC LIMIT 1"
     with _LOCK, db() as conn:
-        row = conn.execute(
-            "SELECT 1 AS n FROM replies WHERE kind=? AND target_key=? AND incoming=? LIMIT 1",
-            (kind, target_key, incoming.strip()),
-        ).fetchone()
-    return row is not None
+        row = conn.execute(sql, (kind, target_key, incoming.strip())).fetchone()
+    if row is None:
+        return False
+    if max_age_seconds is None:
+        return True
+    try:
+        replied_at = datetime.fromisoformat(str(row["created_at"]))
+    except ValueError:
+        return True
+    return (datetime.now() - replied_at).total_seconds() <= max_age_seconds
 
 
 def add_reply(
@@ -341,8 +353,10 @@ def add_reply(
 ) -> int:
     with _LOCK, db() as conn:
         cur = conn.execute(
-            """INSERT OR IGNORE INTO replies (kind, target_key, incoming, reply, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO replies (kind, target_key, incoming, reply, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(kind, target_key, incoming) DO UPDATE SET
+                   reply=excluded.reply, status=excluded.status, created_at=excluded.created_at""",
             (kind, target_key, incoming.strip(), reply, status, now_iso()),
         )
         return int(cur.lastrowid or 0)

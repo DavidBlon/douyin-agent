@@ -16,6 +16,7 @@ from .events import bus
 from .llm import DeepSeekDecider, LLMError
 
 FEED_URL = "https://www.douyin.com/?recommend=1&from_nav=1"
+INBOX_URL = "https://www.douyin.com/user/self"
 
 
 async def fetch_cover_data_url(url: str) -> str:
@@ -38,40 +39,52 @@ async def fetch_cover_data_url(url: str) -> str:
         return ""
 
 
+async def _open_conversation_for_send(browser: BrowserManager, page: Page, target: str) -> bool:
+    for attempt in range(3):
+        conversations = await browser.list_conversations(page)
+        if not conversations:
+            await page.wait_for_timeout(900)
+            continue
+        conv = next(
+            (
+                c
+                for c in conversations
+                if not c.get("is_group") and str(c.get("title") or "").strip() == target
+            ),
+            None,
+        )
+        if conv is None:
+            return False
+        if await browser.open_conversation_by_title(page, target):
+            return True
+        if attempt < 2:
+            try:
+                await page.goto(INBOX_URL, wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(2400)
+            except Exception:
+                pass
+    return False
+
+
 async def send_text_to_contact(browser: BrowserManager, page: Page, target: str, text: str) -> bool:
-    conversations = await browser.list_conversations(page)
-    conv = next(
-        (
-            c
-            for c in conversations
-            if not c.get("is_group") and str(c.get("title") or "").strip() == target
-        ),
-        None,
-    )
-    if not conv:
-        return False
-    if not await browser.open_conversation(page, int(conv.get("index") or 0)):
-        return False
     try:
+        if not await _open_conversation_for_send(browser, page, target):
+            return False
         await browser.send_chat_message(page, text)
         return True
-    finally:
-        try:
-            await page.keyboard.press("Escape")
-            await page.wait_for_timeout(300)
-        except Exception:
-            pass
+    except Exception:
+        return False
 
 
-async def send_link_to_contact(browser: BrowserManager, target: str, text: str) -> bool:
-    """开一个干净页面发兜底链接，避免当前页被视频弹层/分享面板卡住。"""
+async def send_text_to_contact_fresh(browser: BrowserManager, target: str, text: str) -> bool:
+    """用干净页面发文字，避免把搜索页/视频页切走或撞上分享面板。"""
     if not browser.context:
         return False
     page = await browser.new_page()
     page.set_default_timeout(15000)
     try:
-        await page.goto(FEED_URL, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(1800)
+        await page.goto(INBOX_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(2600)
         return await send_text_to_contact(browser, page, target, text)
     except Exception:
         return False
@@ -80,6 +93,10 @@ async def send_link_to_contact(browser: BrowserManager, target: str, text: str) 
             await page.close()
         except Exception:
             pass
+
+
+async def send_link_to_contact(browser: BrowserManager, target: str, text: str) -> bool:
+    return await send_text_to_contact_fresh(browser, target, text)
 
 
 async def _scroll_feed(page: Page) -> None:
@@ -190,7 +207,7 @@ async def _feed_share_one(
                 )
                 return {"status": "dry_run", "detail": "预演，未发送", "aweme_id": aid}
 
-            if not await send_text_to_contact(browser, page, target, message):
+            if not await send_text_to_contact_fresh(browser, target, message):
                 return {"status": "failed", "detail": f"没有找到「{target}」的会话", "aweme_id": aid}
             try:
                 result = await browser.share_current_video(page, target)
@@ -200,9 +217,7 @@ async def _feed_share_one(
             detail = str(result.get("detail") or "")
             if status == "failed":
                 link = f"https://www.douyin.com/video/{aid}"
-                if await send_text_to_contact(
-                    browser, page, target, f"视频卡片没发出去，先给你链接：{link}"
-                ):
+                if await send_link_to_contact(browser, target, f"视频卡片没发出去，先给你链接：{link}"):
                     status = "sent"
                     detail = "原生视频卡片失败，已补发视频链接"
             action_id = db.add_action(
@@ -230,7 +245,7 @@ async def _feed_share_one(
             return {"status": status, "detail": detail, "aweme_id": aid}
 
         not_found = "我找了一圈，暂时没找到合适的视频，换个说法再试试？"
-        await send_text_to_contact(browser, page, target, not_found)
+        await send_text_to_contact_fresh(browser, target, not_found)
         await bus.emit("share", f"点播分享未找到：{target}", {"target": target, "query": query}, level="warn")
         return {"status": "not_found", "detail": not_found}
     finally:
@@ -326,8 +341,8 @@ async def share_one_to_contact(
         await page.wait_for_timeout(2800)
         cards, blocked = await _search_results(page, search_query)
         if blocked:
-            await send_text_to_contact(
-                browser, page, target, "抖音搜索需要你先在专用浏览器里完成一次验证，验证后再让我找。"
+            await send_text_to_contact_fresh(
+                browser, target, "抖音搜索需要你先在专用浏览器里完成一次验证，验证后再让我找。"
             )
             await bus.emit("share", f"点播搜索被验证拦截：{target}", {"query": search_query}, level="warn")
             return {"status": "search_blocked", "detail": "搜索需要手动完成验证"}
@@ -393,40 +408,35 @@ async def share_one_to_contact(
                 )
                 return {"status": "dry_run", "detail": "预演，未发送", "aweme_id": aid}
 
-            # 介绍必须先发；发完 IM 面板会盖住搜索页，回 feed 重新搜一次再打开结果。
-            if not await send_text_to_contact(browser, page, target, message):
+            # 介绍用独立页面发，搜索页保持不动，避免 IM 面板把搜索结果切走。
+            if not await send_text_to_contact_fresh(browser, target, message):
                 return {"status": "failed", "detail": f"没有找到「{target}」的会话", "aweme_id": aid}
-            await page.goto(FEED_URL, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(2200)
-            cards2, blocked2 = await _search_results(page, search_query)
-            opened = False
+            opened = await page.evaluate(
+                """(id) => {
+                    const a = [...document.querySelectorAll('a[href*="/video/"]')].find(a => a.href.includes(id));
+                    if (!a) return false;
+                    a.scrollIntoView({block: 'center'});
+                    a.click();
+                    return true;
+                }""",
+                aid,
+            )
             has_share = False
-            if not blocked2:
-                opened = await page.evaluate(
-                    """(id) => {
-                        const a = [...document.querySelectorAll('a[href*="/video/"]')].find(a => a.href.includes(id));
-                        if (!a) return false;
-                        a.scrollIntoView({block: 'center'});
-                        a.click();
-                        return true;
-                    }""",
-                    aid,
-                )
-                for _ in range(32):
-                    await page.wait_for_timeout(250)
-                    try:
-                        share_btns = page.locator('[data-e2e="video-player-share"]')
-                        for i in range(await share_btns.count()):
-                            if await share_btns.nth(i).is_visible():
-                                has_share = True
-                                break
-                    except Exception:
-                        pass
-                    if has_share:
-                        break
+            for _ in range(32):
+                await page.wait_for_timeout(250)
+                try:
+                    share_btns = page.locator('[data-e2e="video-player-share"]')
+                    for i in range(await share_btns.count()):
+                        if await share_btns.nth(i).is_visible():
+                            has_share = True
+                            break
+                except Exception:
+                    pass
+                if has_share:
+                    break
 
             link = f"https://www.douyin.com/video/{aid}"
-            if blocked2 or not opened or not has_share:
+            if not opened or not has_share:
                 sent = await send_link_to_contact(browser, target, f"视频卡片没发出去，先给你链接：{link}")
                 status = "sent" if sent else "failed"
                 detail = "搜索结果播放器不可用，已补发视频链接" if sent else "视频卡片和链接都发送失败"
@@ -472,8 +482,8 @@ async def share_one_to_contact(
         fallback = await _feed_share_one(browser, settings, target, query)
         if fallback.get("status") in ("sent", "uncertain", "dry_run", "not_found"):
             return fallback
-        await send_text_to_contact(
-            browser, page, target, "我搜了一圈，暂时没找到合适的视频，换个更具体的说法再试试？"
+        await send_text_to_contact_fresh(
+            browser, target, "我搜了一圈，暂时没找到合适的视频，换个更具体的说法再试试？"
         )
         await bus.emit("share", f"点播未找到：{target}", {"query": search_query}, level="warn")
         return {"status": "not_found", "detail": "没有找到合适的视频"}

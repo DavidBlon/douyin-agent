@@ -27,6 +27,57 @@ def _conversation_key(conv: dict[str, Any]) -> str:
     return "dm:" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:20]
 
 
+def _ordered_messages(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ordered = sorted(
+        [r for r in rows if isinstance(r, dict) and not r.get("is_system")],
+        key=lambda r: (
+            r.get("top") if isinstance(r.get("top"), (int, float)) else 10**9,
+            r.get("index") if isinstance(r.get("index"), int) else 10**9,
+        ),
+    )
+    return [r for r in ordered if str(r.get("text") or "").strip() or r.get("images") or r.get("videos")]
+
+
+def _preview_matches(text: str, preview: str) -> bool:
+    a = (text or "").strip()
+    b = (preview or "").strip()
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a
+
+
+async def _read_conversation(
+    browser: BrowserManager,
+    page: Page,
+    conv: dict[str, Any],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read messages and make sure they belong to this conversation, not the previous one."""
+    contact_avatar = _base_url(str(conv.get("avatar") or ""))
+    preview = str(conv.get("preview") or "")
+    messages: list[dict[str, Any]] = []
+    await page.wait_for_timeout(500)
+    for attempt in range(6):
+        messages = _ordered_messages(await browser.read_chat_transcript(page))
+        if messages:
+            latest = messages[-1]
+            text = str(latest.get("text") or "").strip()
+            avatar = _base_url(str(latest.get("avatar") or ""))
+            incoming = bool(avatar and contact_avatar) and avatar == contact_avatar
+            if incoming or bool(latest.get("mine")) or _preview_matches(text, preview):
+                return messages, True
+        if attempt < 5:
+            await page.wait_for_timeout(700)
+    if messages:
+        latest = messages[-1]
+        print(
+            f"[dm] content check failed contact={conv.get('title')!r} preview={preview!r} "
+            f"newest={str(latest.get('text') or '')[:60]!r} avatar={_base_url(str(latest.get('avatar') or ''))[:60]!r} "
+            f"mine={latest.get('mine')} total={len(messages)}",
+            flush=True,
+        )
+    return messages, False
+
+
 class AutoReplier:
     def __init__(self, runner: AgentRunner) -> None:
         self.runner = runner
@@ -317,15 +368,27 @@ class AutoReplier:
             if not await self.browser.open_conversation_by_title(active_page, name):
                 skips.append((name, "打开会话失败"))
                 continue
-            messages = await self.browser.read_chat_messages(active_page)
+            messages, fresh = await _read_conversation(self.browser, active_page, conv)
             if not messages:
                 skips.append((name, "没有读到消息"))
                 continue
-            latest = messages[0]
+            if not fresh:
+                newest_text = str(messages[-1].get("text") or "").strip()
+                if newest_text in ("打个招呼吧", "发个消息吧", "开始聊天吧"):
+                    skips.append((name, "对方还没发消息"))
+                else:
+                    skips.append((name, "会话内容没有切换"))
+                continue
+            latest = messages[-1]
             latest_text = str(latest.get("text") or "").strip()
             if not latest_text:
-                skips.append((name, "最后一条没有文字"))
-                continue
+                if latest.get("videos"):
+                    latest_text = "[对方发来视频]"
+                elif latest.get("images"):
+                    latest_text = "[对方发来图片]"
+                else:
+                    skips.append((name, "最后一条没有文字"))
+                    continue
             contact_avatar = _base_url(str(conv.get("avatar") or ""))
             latest_avatar = _base_url(str(latest.get("avatar") or ""))
             if latest_avatar:
@@ -341,50 +404,116 @@ class AutoReplier:
             if settings.dry_run and dry_key in self._dry_run_seen:
                 continue
 
-            transcript = list(reversed(messages[:8]))
+            transcript = messages[-8:]
             for item in transcript:
                 avatar = _base_url(str(item.get("avatar") or ""))
                 item["outgoing"] = bool(avatar and contact_avatar and avatar != contact_avatar)
             context = {
                 "contact": name,
                 "relation": "互相关注" if conv["relation"] == "mutual" else ("白名单" if conv["allowlisted"] else "已有会话"),
-                "messages": transcript,
+                "messages": [
+                    {
+                        "text": str(item.get("text") or "").strip(),
+                        "time": str(item.get("time") or ""),
+                        "outgoing": bool(item.get("outgoing")),
+                        "images": item.get("images") or [],
+                        "videos": item.get("videos") or [],
+                    }
+                    for item in transcript
+                ],
             }
             decision, usage = await decider.reply("dm", context, db.recent_replies(6))
-            if not decision.share and db.reply_exists("reply_dm", target_key, latest_text):
+            if not decision.share and db.reply_exists(
+                "reply_dm", target_key, latest_text, max_age_seconds=600
+            ):
                 skips.append((name, "这条消息已经回复过"))
                 continue
             if decision.share:
-                share_result = await share_one_to_contact(
-                    self.browser,
-                    settings,
-                    name,
-                    decision.share_query,
-                    latest_text,
-                )
+                try:
+                    share_result = await share_one_to_contact(
+                        self.browser,
+                        settings,
+                        name,
+                        decision.share_query,
+                        latest_text,
+                    )
+                except Exception as exc:
+                    share_result = {"status": "failed", "detail": str(exc)[:300]}
                 share_status = str(share_result.get("status") or "failed")
-                if not settings.dry_run:
+                if share_status in ("sent", "uncertain"):
+                    if not settings.dry_run:
+                        db.add_reply(
+                            kind="reply_dm",
+                            target_key=target_key,
+                            incoming=latest_text,
+                            reply="[视频分享]",
+                            status="sent",
+                        )
+                    handled += 1
+                    await bus.emit(
+                        "reply",
+                        f"点播分享 {name}：{share_status}",
+                        {
+                            "contact": name,
+                            "incoming": latest_text[:120],
+                            "share_query": decision.share_query,
+                            "status": share_status,
+                            "detail": share_result.get("detail") or "",
+                            "aweme_id": share_result.get("aweme_id") or "",
+                        },
+                        level="info",
+                    )
+                    continue
+                # 分享失败也要回一句，不能把对方晾在“已读不回”上。
+                fallback = policy.clean_text(decision.reply, settings.max_dm_chars)
+                if not fallback:
+                    fallback = "刚去给你找视频了，没找到合适的，换个更具体的说法再试试？"
+                if settings.dry_run:
+                    skips.append((name, "预演：分享未发送"))
+                    continue
+                try:
+                    sent = await self.browser.send_chat_message(active_page, fallback)
+                except Exception as exc:
+                    skips.append((name, "分享和文字回复都失败"))
+                    await bus.emit(
+                        "reply",
+                        f"点播分享失败：{name} · {exc}",
+                        {"contact": name, "detail": share_result.get("detail") or ""},
+                        level="error",
+                    )
+                    continue
+                if str(sent.get("status") or "") in ("sent", "uncertain"):
                     db.add_reply(
                         kind="reply_dm",
                         target_key=target_key,
                         incoming=latest_text,
-                        reply="[视频分享]",
-                        status="sent" if share_status in ("sent", "uncertain") else "skipped",
+                        reply=fallback,
+                        status=str(sent.get("status") or "uncertain"),
                     )
-                if share_status in ("sent", "uncertain"):
                     handled += 1
+                await self._record(
+                    settings,
+                    "reply_dm",
+                    target_key,
+                    name,
+                    urls.get(name, ""),
+                    latest_text,
+                    fallback,
+                    str(sent.get("status") or "uncertain"),
+                    decision.reason,
+                    f"分享失败，已改发文字：{share_result.get('detail') or ''}"[:300],
+                )
                 await bus.emit(
                     "reply",
-                    f"点播分享 {name}：{share_status}",
+                    f"点播分享失败，已回文字 {name}：{fallback}",
                     {
                         "contact": name,
                         "incoming": latest_text[:120],
-                        "share_query": decision.share_query,
-                        "status": share_status,
+                        "share_status": share_status,
                         "detail": share_result.get("detail") or "",
-                        "aweme_id": share_result.get("aweme_id") or "",
+                        "reply": fallback,
                     },
-                    level="info" if share_status in ("sent", "uncertain") else "warn",
+                    level="warn",
                 )
                 continue
             reply = policy.clean_text(decision.reply, settings.max_dm_chars)

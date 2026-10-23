@@ -278,6 +278,19 @@ def normalize_transcript(
     return messages[-80:]
 
 
+def _conversation_is_fresh(messages: list[dict[str, Any]], target: dict[str, Any]) -> bool:
+    if not messages:
+        return False
+    newest = messages[-1]
+    if newest.get("incoming"):
+        return True
+    text = str(newest.get("text") or "").strip()
+    if newest.get("media") and not text:
+        return True
+    preview = str(target.get("preview") or "").strip()
+    return bool(text and preview and (text in preview or preview in text))
+
+
 class ChatService:
     def __init__(self) -> None:
         self.runner = runner
@@ -473,6 +486,37 @@ class ChatService:
                 return item
         return None
 
+    async def _read_fresh(
+        self, page: Page, target: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], bool]:
+        messages: list[dict[str, Any]] = []
+        await page.wait_for_timeout(500)
+        for attempt in range(10):
+            rows = await self.browser.read_chat_transcript(page)
+            messages = normalize_transcript(rows, target)
+            if _conversation_is_fresh(messages, target):
+                return messages, True
+            if attempt < 9:
+                await page.wait_for_timeout(700)
+        return messages, False
+
+    async def _open_target(
+        self, page: Page, target: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        title = str(target.get("title") or "")
+        opened = await self.browser.open_conversation_by_title(page, title)
+        if not opened:
+            opened = await self.browser.open_conversation(page, int(target.get("index") or 0))
+            if opened:
+                header = await self.browser.chat_header_title(page)
+                opened = bool(header and (header == title or title in header))
+        if not opened:
+            raise ActionError("打开会话失败")
+        messages, fresh = await self._read_fresh(page, target)
+        if not fresh:
+            raise ActionError("会话内容没有切换，请重试")
+        return messages
+
     async def _open(self, key: str) -> tuple[dict[str, Any], list[dict[str, Any]], Page]:
         if self._needs_fresh_page:
             await self._close_page()
@@ -489,22 +533,26 @@ class ChatService:
             target = await self._find(key)
         if target is None:
             raise ActionError("会话不存在或列表已更新")
-        if self._current_key != key:
-            opened = await self.browser.open_conversation_by_title(page, str(target.get("title") or ""))
-            if not opened:
-                opened = await self.browser.open_conversation(page, int(target.get("index") or 0))
-            if not opened:
-                raise ActionError("打开会话失败")
-            await page.wait_for_timeout(1000)
-            self._current_key = key
+        if self._current_key == key:
             set_active(key)
-        else:
-            set_active(key)
-        rows = await self.browser.read_chat_transcript(page)
-        if not rows:
-            await page.wait_for_timeout(700)
-            rows = await self.browser.read_chat_transcript(page)
-        messages = normalize_transcript(rows, target)
+            messages, fresh = await self._read_fresh(page, target)
+            if fresh:
+                self._last_activity = time.monotonic()
+                return target, messages, page
+            # 页面还停在别的会话上：丢掉这张页，换干净页重开。
+            await self._close_page()
+            page = await self._ensure_page()
+            if page is None:
+                raise ActionError("浏览器页面不可用")
+            await self._list_raw(page)
+            target = await self._find(key) or target
+        try:
+            messages = await self._open_target(page, target)
+        except Exception:
+            self._needs_fresh_page = True
+            raise
+        self._current_key = key
+        set_active(key)
         self._last_activity = time.monotonic()
         return target, messages, page
 
@@ -535,8 +583,9 @@ class ChatService:
                     target, messages, _page = await self._open(key)
                 else:
                     set_active(key)
-                    rows = await self.browser.read_chat_transcript(page)
-                    messages = normalize_transcript(rows, target)
+                    messages, fresh = await self._read_fresh(page, target)
+                    if not fresh:
+                        target, messages, _page = await self._open(key)
                     self._last_activity = time.monotonic()
             finally:
                 self._release_browser(held)

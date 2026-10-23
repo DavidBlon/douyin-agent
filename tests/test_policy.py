@@ -139,3 +139,9 @@ def test_reply_exists_is_scoped(temp_db):
     assert db.reply_exists("reply_dm", "dm:a", "你好")
     assert not db.reply_exists("reply_dm", "dm:b", "你好")
     assert not db.reply_exists("reply_comment", "dm:a", "你好")
+
+
+def test_reply_exists_respects_max_age(temp_db):
+    db.add_reply(kind="reply_dm", target_key="dm:a", incoming="你好", reply="在的")
+    assert db.reply_exists("reply_dm", "dm:a", "你好", max_age_seconds=600)
+    assert not db.reply_exists("reply_dm", "dm:a", "你好", max_age_seconds=-1)

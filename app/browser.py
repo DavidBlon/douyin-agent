@@ -1108,23 +1108,156 @@ class BrowserManager:
             box = await item.bounding_box()
             if not box:
                 return False
-            await page.evaluate(
-                "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = 'none'; }"
-            )
-            # 顶部栏的悬浮层会盖住较低的会话行，点击期间临时让 header 穿透。
-            try:
-                await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-            finally:
+            points: list[tuple[float, float]] = [
+                (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            ]
+            for sel in (".conversationConversationItemtitle", "img"):
                 try:
-                    await page.evaluate(
-                        "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = ''; }"
+                    loc = item.locator(sel).first
+                    if await loc.count():
+                        b = await loc.bounding_box()
+                        if b:
+                            points.append((b["x"] + b["width"] / 2, b["y"] + b["height"] / 2))
+                except Exception:
+                    continue
+            for x, y in points:
+                await page.evaluate(
+                    "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = 'none'; }"
+                )
+                covered = False
+                hit_info = ""
+                try:
+                    hit_info = await page.evaluate(
+                        """(pt) => {
+                            const hit = document.elementFromPoint(pt.x, pt.y);
+                            if (!hit) return 'none';
+                            const cls = typeof hit.className === 'string' ? hit.className : '';
+                            return `${hit.tagName}.${cls.slice(0, 60)}`;
+                        }""",
+                        {"x": x, "y": y},
+                    )
+                    covered = not bool(
+                        await item.evaluate(
+                            """(el, pt) => {
+                                const hit = document.elementFromPoint(pt.x, pt.y);
+                                return !!hit && (el === hit || el.contains(hit));
+                            }""",
+                            {"x": x, "y": y},
+                        )
                     )
                 except Exception:
                     pass
-            return True
+                if covered:
+                    print(f"[chat] row point covered by {hit_info}", flush=True)
+                    continue
+                # 顶部栏的悬浮层会盖住较低的会话行，点击期间临时让 header 穿透。
+                try:
+                    await page.mouse.click(x, y)
+                finally:
+                    try:
+                        await page.evaluate(
+                            "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = ''; }"
+                        )
+                    except Exception:
+                        pass
+                return True
+            try:
+                await page.evaluate(
+                    "() => { const h = document.querySelector('#douyin-header'); if (h) h.style.pointerEvents = ''; }"
+                )
+            except Exception:
+                pass
+            print(
+                f"[chat] conversation row covered at ({points[0][0]:.0f},{points[0][1]:.0f}) hit={hit_info}",
+                flush=True,
+            )
+            return False
         except Exception as exc:
             print(f"[chat] click conversation row failed: {str(exc)[:240]!r}", flush=True)
             return False
+
+    async def chat_header_title(self, page: Page) -> str:
+        try:
+            return (await page.locator(".StackLayoutStackChatHeadertitle").first.inner_text()).strip()
+        except Exception:
+            return ""
+
+    async def chat_list_visible(self, page: Page) -> bool:
+        items = page.locator('[data-e2e="conversation-item"]')
+        try:
+            count = await items.count()
+        except Exception:
+            return False
+        for index in range(min(count, 6)):
+            item = items.nth(index)
+            try:
+                box = await item.bounding_box()
+                if not box or box["width"] < 40 or box["height"] < 20:
+                    continue
+                x = box["x"] + box["width"] / 2
+                y = box["y"] + box["height"] / 2
+                hit = await item.evaluate(
+                    """(el, pt) => {
+                        const node = document.elementFromPoint(pt.x, pt.y);
+                        return !!node && (el === node || el.contains(node));
+                    }""",
+                    {"x": x, "y": y},
+                )
+                if hit:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def chat_back_to_list(self, page: Page) -> bool:
+        """Douyin 私信是浮动聊天窗；切换会话前要先点左上角返回，露出会话列表。"""
+        if await self.chat_list_visible(page):
+            return True
+        points: list[tuple[float, float]] = []
+        try:
+            info = await page.evaluate(
+                """() => {
+                    const title = document.querySelector('.StackLayoutStackChatHeadertitle');
+                    if (!title) return null;
+                    let panel = title;
+                    for (let i = 0; i < 12 && panel.parentElement; i++) {
+                        const r = panel.getBoundingClientRect();
+                        if (r.width >= 260 && r.height >= 250) break;
+                        panel = panel.parentElement;
+                    }
+                    const tr = title.getBoundingClientRect();
+                    const pr = panel.getBoundingClientRect();
+                    return {
+                        panelLeft: pr.left, panelTop: pr.top, panelWidth: pr.width, panelHeight: pr.height,
+                        titleLeft: tr.left, titleY: tr.top + tr.height / 2,
+                    };
+                }"""
+            )
+        except Exception:
+            info = None
+        if info:
+            title_left = float(info["titleLeft"])
+            title_y = float(info["titleY"])
+            panel_left = float(info["panelLeft"])
+            points.extend(
+                [
+                    (title_left - 50, title_y),
+                    (title_left - 36, title_y),
+                    (panel_left + 22, title_y),
+                    (panel_left + 32, title_y),
+                    (panel_left + 44, title_y),
+                ]
+            )
+        for x, y in points[:6]:
+            try:
+                await page.mouse.click(x, y)
+            except Exception:
+                continue
+            await page.wait_for_timeout(650)
+            if await self.chat_list_visible(page):
+                return True
+        print(f"[chat] back-to-list failed points={points[:6]} info={info}", flush=True)
+        return False
 
     async def open_conversation(self, page: Page, index: int) -> bool:
         loc = page.locator('[data-e2e="conversation-item"]').nth(index)
@@ -1137,6 +1270,31 @@ class BrowserManager:
         wanted = (title or "").strip()
         if not wanted:
             return False
+        header_now = await self.chat_header_title(page)
+        if header_now and (header_now == wanted or wanted in header_now):
+            return True
+        try:
+            if await page.locator('[data-e2e="conversation-item"]').count() == 0:
+                await self.open_inbox(page)
+                await page.wait_for_timeout(700)
+        except Exception:
+            pass
+        if not await self.chat_list_visible(page):
+            recovered = await self.chat_back_to_list(page)
+            if not recovered:
+                try:
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(500)
+                    await self.open_inbox(page)
+                    await page.wait_for_timeout(800)
+                    recovered = await self.chat_list_visible(page)
+                    if not recovered:
+                        recovered = await self.chat_back_to_list(page)
+                except Exception:
+                    recovered = False
+            if not recovered:
+                print(f"[chat] cannot reveal conversation list for {wanted!r}", flush=True)
+                return False
         items = page.locator('[data-e2e="conversation-item"]')
         count = 0
         last_exact: list[int] = []
@@ -1167,22 +1325,25 @@ class BrowserManager:
                     continue
                 for _ in range(16):
                     await page.wait_for_timeout(250)
-                    try:
-                        header = (await page.locator('.StackLayoutStackChatHeadertitle').first.inner_text()).strip()
-                    except Exception:
-                        header = ""
+                    header = await self.chat_header_title(page)
                     if header and (header == wanted or wanted in header):
+                        await page.wait_for_timeout(350)
                         return True
             try:
                 await page.mouse.move(8, 8)
                 await page.wait_for_timeout(350)
             except Exception:
                 pass
+        header = await self.chat_header_title(page)
         print(
             f"[chat] open conversation failed title={wanted!r} count={count} "
-            f"exact={last_exact} loose={last_loose}",
+            f"exact={last_exact} loose={last_loose} header={header!r} url={page.url[:120]!r}",
             flush=True,
         )
+        try:
+            await page.screenshot(path=str(self._shots / f"chat_open_fail_{_now_tag()}.png"))
+        except Exception:
+            pass
         return False
 
     async def reply_comment_on_work(
@@ -1368,7 +1529,12 @@ class BrowserManager:
         return [dict(x) for x in (data or []) if isinstance(x, dict)]
 
     async def send_chat_message(self, page: Page, text: str) -> dict[str, Any]:
-        box = await self._find_visible_in(page, selectors.DM_INPUT, prefer_last=True)
+        box = None
+        for _ in range(12):
+            box = await self._find_visible_in(page, selectors.DM_INPUT, prefer_last=True)
+            if box:
+                break
+            await page.wait_for_timeout(300)
         if not box:
             raise ActionError("没有找到私信输入框")
         draft = await self._editor_text(box)
