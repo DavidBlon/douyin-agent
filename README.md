@@ -118,13 +118,27 @@ uv run playwright install chromium
 
 ### 5. 启动
 
+Windows 下双击 `start.bat` 即可，**推荐日常使用这个方式**：它通过
+[RunHiddenConsole](https://github.com/wenshui2008/RunHiddenConsole) 把服务拉成后台守护进程——
+
+- 没有黑窗，控制台窗口关掉服务照常运行；
+- 子进程崩溃会被自动重启（`/r` 监管）；
+- PID 记在 `data/logs/douyin-agent.pid`，日志写在 `data/logs/server.log`；
+- `web/dist/index.html` 不存在时会自动构建前端，Python 依赖缺失时会自动 `uv sync`。
+
+启动成功会自动打开 <http://127.0.0.1:8787>。
+
+停止服务双击 `stop.bat`：它先发停止信号让守护进程和子进程一起退出，再兜底清理残留的
+服务进程、专用 Chrome 和 Playwright 驱动。
+
+> RunHiddenConsole 路径默认是 `D:\RunHiddenConsole\x64\RunHiddenConsole.exe`，
+> 换位置的话改环境变量 `RHC_PATH`，或直接改 `scripts/service_lib.ps1` 里的 `$RhcPath`。
+
+前台运行（调试用，不走守护进程）：
+
 ```bash
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8787
 ```
-
-或者 Windows 直接双击 `start.bat`。它调用 `scripts/start.ps1`，在 `web/dist/index.html` 不存在时会自动构建前端，然后启动服务。
-
-打开 <http://127.0.0.1:8787>。
 
 ### 6. 首次登录和试跑
 
@@ -139,9 +153,11 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8787
 
 - **`uv` 找不到**：安装后重开终端，或把 `%USERPROFILE%\.local\bin` 加入 PATH。
 - **`npm` 找不到**：安装 Node.js 20+ 后重开终端。
+- **找不到 RunHiddenConsole**：确认 `D:\RunHiddenConsole\x64\RunHiddenConsole.exe` 存在，或设置 `RHC_PATH` 环境变量。
 - **Chrome 启动失败**：安装 Google Chrome，或执行 `uv run playwright install chromium` 并清空 `CHROME_CHANNEL`。
 - **登录二维码看不到**：确认 `HEADLESS=false`，并通过设置页“登录浏览器”打开；Windows 服务方式运行时必须能在当前用户桌面/RDP 会话中显示窗口。
-- **8787 被占用**：停掉旧进程，或换一个端口启动。
+- **8787 被占用**：双击 `stop.bat` 停掉旧实例；被别的程序占用时换一个端口启动。
+- **服务起不来**：看 `data/logs/server.log`（崩溃堆栈也在里面，追加写入，重启不丢）。
 - **页面是旧的**：重新执行前端构建步骤，再刷新浏览器。
 - **更新代码**：
 
@@ -153,6 +169,8 @@ npm install
 npm run build
 cd ..
 ```
+
+守护进程不会自动加载新代码，改完代码后双击 `stop.bat` → `start.bat` 重启一次。
 
 开发模式（Vite 热更新 + 后端）：
 
@@ -247,7 +265,11 @@ app/
   selectors.py  抖音页面选择器（优先改这里）
 web/            React + Vite 控制台
 tests/          策略、mock 浏览器、agent 预演
-scripts/        启动/开发/窗口控制脚本
+scripts/
+  start.ps1     start.bat 调用：构建前端 → 起 RunHiddenConsole 守护进程 → 等就绪
+  stop.ps1      stop.bat 调用：发停止信号 → 清理残留服务/浏览器进程
+  service_lib.ps1  守护进程的共享配置（端口、路径、RHC 路径、进程识别）
+  run_server.py 守护子进程：进程内跑 uvicorn，日志追加写 data/logs/server.log
 data/           本机运行数据（不进入 git）
 ```
 
