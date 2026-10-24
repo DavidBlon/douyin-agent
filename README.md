@@ -161,7 +161,7 @@ Windows 下双击 `start.bat` 即可，**推荐日常使用这个方式**：它�
 - PID 记在 `data/logs/douyin-agent.pid`，日志写在 `data/logs/server.log`；
 - `web/dist/index.html` 不存在时会自动构建前端，Python 依赖缺失时会自动 `uv sync`。
 
-启动成功会自动打开 <http://127.0.0.1:8787>。
+启动成功会自动打开 <http://127.0.0.1:8787>。首次打开控制台会要求输入**本地访问令牌**（见下方「本地访问令牌」），粘贴一次即可。
 
 停止服务双击 `stop.bat`：它先发停止信号让守护进程和子进程一起退出，再兜底清理残留的
 服务进程、专用 Chrome 和 Playwright 驱动。
@@ -260,7 +260,17 @@ powershell -ExecutionPolicy Bypass -File scripts/dev.ps1
 
 发给模型服务的只有视频标题、描述、评论文本和封面图片；不会发送 Cookie 或登录态。
 
-HTTP 服务默认只绑定 `127.0.0.1`，没有内置登录鉴权。不要把 8787 直接暴露到公网；远程访问请使用 Tailscale/SSH 隧道，或在 Nginx 后面增加 HTTPS 和认证。
+HTTP 服务默认只绑定 `127.0.0.1`，`/api/*` 接口带本地访问令牌鉴权（见下方「本地访问令牌」）。不要把 8787 直接暴露到公网；远程访问请使用 Tailscale/SSH 隧道，或在 Nginx 后面增加 HTTPS 和认证。
+
+## 本地访问令牌
+
+`/api/*` 全部接口要求令牌，防止本机其它程序或浏览器里的网页偷偷调用写操作接口（发送私信、启动一轮等）。
+
+- 首次启动自动生成令牌，保存在 `data/local_token`（已 gitignore），并打印在 `data/logs/server.log` 的「本地 API 令牌」一行。
+- 也可以在 `.env` 里用 `LOCAL_API_TOKEN=...` 固定令牌；设置后以 `.env` 为准。
+- 浏览器打开控制台时会弹出输入卡片，粘贴一次即可（存在浏览器 localStorage）。
+- 脚本调用示例：`curl -H "Authorization: Bearer <令牌>" http://127.0.0.1:8787/api/status`。
+- 例外：`GET /api/health` 不需要令牌（启动脚本用它做就绪探测）；`/media`、`/debug` 和前端静态资源不在保护范围内——所以仍然不要把 8787 暴露到公网。
 
 ## 安全边界
 
@@ -293,9 +303,20 @@ uv run pytest -q
 
 ```text
 app/
-  main.py       FastAPI 路由、SSE、静态页面
+  main.py       FastAPI 装配：lifespan、CORS、令牌中间件、路由挂载、静态页面
+  api/          按域拆分的路由（system/settings/chat/share/fans/analytics/content/crm/records/debug/live）
   agent.py      一轮运行循环（读取 → 判断 → 策略 → 执行 → 记录）
-  browser.py    Playwright 持久化 Chrome、读取与页面动作
+  browser/      Playwright 浏览器操作包：
+    core.py       实例状态、生命周期、窗口管理、登录/风控、通用查找
+    feed.py       推荐流读取、翻页、点赞、评论、主动私信
+    creator_reply.py  自己作品下的评论回复
+    inbox.py      收件箱、会话、私信发送
+    share.py      原生视频分享
+    fans.py       粉丝列表、回关/取关
+    notices.py    通知读取与点击
+    js.py         页面内 JS 片段；manager.py 组合出 BrowserManager
+  auth.py       本地 API 令牌：生成、落盘、ASGI 校验中间件
+  services.py   replier/sharer 共享单例
   policy.py     额度/去重/白名单/内容检查
   prompts.py    模型提示词
   analytics.py  作品采集、每日数据快照
@@ -310,7 +331,7 @@ app/
   db.py         SQLite
   selectors.py  抖音页面选择器（优先改这里）
 web/            React + Vite 控制台
-tests/          策略、mock 浏览器、内容/数据/CRM 测试
+tests/          策略、mock 浏览器、内容/数据/CRM/鉴权测试
 scripts/
   start.ps1     start.bat 调用：构建前端 → 起 RunHiddenConsole 守护进程 → 等就绪
   stop.ps1      stop.bat 调用：发停止信号 → 清理残留服务/浏览器进程

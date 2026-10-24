@@ -39,6 +39,8 @@ class Env(BaseSettings):
     chrome_channel: str = "chrome"
     headless: bool = False
     mock_url: str = ""
+    # 本地 API 令牌；留空则自动生成并写到 data/local_token
+    local_api_token: str = ""
 
 
 env = Env()

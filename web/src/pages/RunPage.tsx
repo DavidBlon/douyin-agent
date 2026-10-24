@@ -23,7 +23,7 @@ import {
   Video as VideoIcon,
   WandSparkles,
 } from "lucide-react";
-import { api } from "../api";
+import { api, getToken } from "../api";
 import type { AgentEvent, Fan, FansResponse, RunProgress, Settings, Status, Video } from "../types";
 import { EmptyState, QuotaBar, TypeBadge, Toggle } from "../components/ui";
 import { ChatDock } from "../components/ChatDock";
@@ -94,7 +94,9 @@ function LiveFeed() {
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const connect = () => {
       if (closed) return;
-      ws = new WebSocket(`${proto}//${window.location.host}/api/live/ws`);
+      const token = getToken();
+      const base = `${proto}//${window.location.host}/api/live/ws`;
+      ws = new WebSocket(token ? `${base}?token=${encodeURIComponent(token)}` : base);
       ws.binaryType = "arraybuffer";
       ws.onopen = () => setState("connecting");
       ws.onmessage = (event) => {

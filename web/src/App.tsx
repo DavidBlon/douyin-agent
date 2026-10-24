@@ -14,7 +14,7 @@ import {
   Wifi,
   WifiOff,
 } from "lucide-react";
-import { actionKindLabel, api, statusLabel } from "./api";
+import { AUTH_REQUIRED_EVENT, actionKindLabel, api, statusLabel, tokenQuery } from "./api";
 import type {
   Action,
   ActionsResponse,
@@ -27,6 +27,7 @@ import type {
   Video,
 } from "./types";
 import { Drawer, StatusBadge, Toast, TypeBadge } from "./components/ui";
+import { TokenGate } from "./components/TokenGate";
 import { RunPage } from "./pages/RunPage";
 import { ActionsPage } from "./pages/ActionsPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -90,6 +91,7 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [bootError, setBootError] = useState("");
   const [loadingActions, setLoadingActions] = useState(false);
+  const [authRequired, setAuthRequired] = useState(false);
 
   useEffect(() => {
     try {
@@ -166,6 +168,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const onAuthRequired = () => setAuthRequired(true);
+    window.addEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
@@ -183,7 +191,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const es = new EventSource("/api/events");
+    const query = tokenQuery();
+    const es = new EventSource(query ? `/api/events?${query}` : "/api/events");
     es.onopen = () => {
       setLive(true);
       refreshRef.current.status();
@@ -400,6 +409,10 @@ export default function App() {
     setStatusFilter(next);
     setActionPage(1);
   };
+
+  if (authRequired) {
+    return <TokenGate />;
+  }
 
   if (bootError) {
     return (

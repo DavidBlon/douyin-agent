@@ -567,6 +567,9 @@ input, textarea, [contenteditable="true"] {
 .boot-card p { color: var(--muted); font-size: 12px; }
 .boot-card code { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); font: 11px var(--mono); overflow-x: auto; }
 .boot-loading { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.token-gate-form { width: 100%; display: flex; gap: 8px; margin-top: 4px; }
+.token-gate-form .input { flex: 1; min-width: 0; }
+.token-gate-form .btn { flex-shrink: 0; }
 
 /* Douyin-inspired theme */
 .topbar { background: rgba(0, 0, 0, 0.84); }

@@ -17,14 +17,58 @@ import type {
   Status,
 } from "./types";
 
+const TOKEN_KEY = "douyin-agent-token";
+
+export const AUTH_REQUIRED_EVENT = "douyin-agent-auth-required";
+
+export function getToken(): string {
+  try {
+    return window.localStorage.getItem(TOKEN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function setToken(token: string): void {
+  try {
+    window.localStorage.setItem(TOKEN_KEY, token.trim());
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+export function clearToken(): void {
+  try {
+    window.localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/** EventSource / WebSocket 不能自定义请求头，只能把令牌放进查询参数。 */
+export function tokenQuery(): string {
+  const token = getToken();
+  return token ? `token=${encodeURIComponent(token)}` : "";
+}
+
+function handle401(): void {
+  clearToken();
+  window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT));
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getToken();
   const res = await fetch(path, {
     ...init,
     headers: {
       "content-type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers || {}),
     },
   });
+  if (res.status === 401) {
+    handle401();
+  }
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
     try {
@@ -39,7 +83,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function requestForm<T>(path: string, form: FormData): Promise<T> {
-  const res = await fetch(path, { method: "POST", body: form });
+  const token = getToken();
+  const res = await fetch(path, {
+    method: "POST",
+    body: form,
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (res.status === 401) {
+    handle401();
+  }
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
     try {
